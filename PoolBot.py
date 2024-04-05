@@ -144,6 +144,7 @@ class PoolBot(discord.Client):
             1065101182525259866)
         self.side_quest_pools_channel = self.get_channel(1055515435073806387)
         self.pending_lfm_user_mention = None
+        self.pending_lfm_user_id = None
         self.active_lfm_message = None
         self.num_boosters_awaiting = 0
         self.awaiting_boosters_for_user = None
@@ -617,16 +618,29 @@ class PoolBot(discord.Client):
             )
             return
 
+        standings_data = await self.get_spreadsheet_values("Standings!E6:T")
+
+        print(repr(standings_data))
+        print(repr(self.pending_lfm_user_id))
+        print(repr(message.author.id))
+
+        pending_user_row = next(filter(lambda r: len(r) and r[-1] == str(self.pending_lfm_user_id), standings_data), None)
+        challenger_row = next(filter(lambda r: len(r) and r[-1] == str(message.author.id), standings_data), None)
+
+        pending_user_team = pending_user_row and pending_user_row[0] and f" ({pending_user_row[0]})" or ""
+        challenger_team = challenger_row and challenger_row[0] and f" ({challenger_row[0]})" or ""
+
         await self.lfm_channel.send(
-            f"{self.pending_lfm_user_mention}, your anonymous LFM has been accepted by {message.author.mention}.")
+            f"{self.pending_lfm_user_mention}{pending_user_team}, your anonymous LFM has been accepted by {message.author.mention}{challenger_team}.")
 
         await update_message(
             self.active_lfm_message,
             f'~~{self.active_lfm_message.content}~~\n'
-            f'A match was found between {self.pending_lfm_user_mention} and {message.author.mention}.'
+            f'A match was found between {self.pending_lfm_user_mention}{pending_user_team} and {message.author.mention}{challenger_team}.'
         )
 
         self.pending_lfm_user_mention = None
+        self.pending_lfm_user_id = None
         self.active_lfm_message = None
 
     async def choose_pack(self, user: Union[discord.Member, discord.User], chosen_option: str):
@@ -706,6 +720,7 @@ class PoolBot(discord.Client):
                 f"If you want to cancel this, send me a message with the text `!nvm`."
             )
             self.pending_lfm_user_mention = message.author.mention
+            self.pending_lfm_user_id = message.author.id
             return
 
         if command == '!retractlfm' or command == '!nvm':
@@ -716,6 +731,7 @@ class PoolBot(discord.Client):
                     "Understood. The post made on your behalf has been deleted."
                 )
                 self.pending_lfm_user_mention = None
+                self.pending_lfm_user_id = None
             else:
                 await message.author.send(
                     "You don't currently have an outgoing LFM."
