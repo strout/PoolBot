@@ -437,12 +437,10 @@ class PoolBot(discord.Client):
             return
 
         # Get sealeddeck link and loss count from spreadsheet
-        spreadsheet_values = await self.get_spreadsheet_values('Pools!B7:AA200')
-        spreadsheet_formulas = await self.get_spreadsheet_values('Pools!B7:AA200', valueRenderOption="FORMULA")
+        spreadsheet_values = await self.get_spreadsheet_values('Pools!B7:P200')
+        spreadsheet_formulas = await self.get_spreadsheet_values('Pools!B7:P200', valueRenderOption="FORMULA")
         curr_row = 6
         current_pool = 'Not found'
-        extra_cards = []
-        extra_card_count = 0
         loss_count = 0
         pack_to_replace = None
         for (row, formulas) in zip(spreadsheet_values, spreadsheet_formulas):
@@ -451,12 +449,9 @@ class PoolBot(discord.Client):
                 continue
             if row[0].lower() != '' and row[0].lower() in pack_owner_mention.display_name.lower():
                 current_pool = row[3]
-                # Columns T through Z inclusive have extra cards
-                extra_cards = [{"name": card, "count": 1} for card in row[(ord('T') - ord('B')):(ord('Z')-ord('B')+1)] if card != '']
-                # Column AA has extra card count
-                extra_card_count = int(row[ord('Z')-ord('B')+1])
                 loss_count = int(row[2])
-                replace_id_match = re.search("\\.tech/(?P<id>[a-zA-Z0-9]*)", formulas[ord('F') - ord('B') + loss_count])
+                pack_cell_index = ord('F') - ord('B') + loss_count
+                replace_id_match = pack_cell_index < len(formulas) and re.search("\\.tech/(?P<id>[a-zA-Z0-9]*)", formulas[pack_cell_index])
                 pack_to_replace = replace_id_match and replace_id_match.group("id")
                 break
         if current_pool == 'Not found':
@@ -513,19 +508,6 @@ class PoolBot(discord.Client):
             await self.set_cell_to_red(curr_row, chr(ord('F') + loss_count))
             return
 
-        # record any extra cards we haven't yet
-        if len(extra_cards) > extra_card_count:
-            try:
-                # Add extra cards
-                updated_pool_id = await pool_to_sealeddeck(
-                    extra_cards[extra_card_count:], updated_pool_id
-                )
-            except:
-                print("sealeddeck issue — updating pool")
-                # If something goes wrong with sealeddeck, highlight the pack cell red
-                await self.set_cell_to_red(curr_row, chr(ord('F') + loss_count))
-                return
-
         # Write updated extra-card-included pool to spreadsheet
         pool_body = {
             'values': [
@@ -535,11 +517,6 @@ class PoolBot(discord.Client):
         self.sheet.values().update(spreadsheetId=self.spreadsheet_id,
                                    range=f'Pools!E{curr_row}:E{curr_row}', valueInputOption='USER_ENTERED',
                                    body=pool_body).execute()
-        if len(extra_cards) > extra_card_count:
-            self.sheet.values().update(spreadsheetId=self.spreadsheet_id,
-                                       range=f'Pools!AA{curr_row}:AA{curr_row}', valueInputOption='USER_ENTERED',
-                                       body={'values': [[len(extra_cards)]]}).execute()
-
         return
 
     async def write_pack(self, new_pack_id: str, loss_count: int, curr_row: int):
