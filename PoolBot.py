@@ -180,7 +180,7 @@ class PoolBot(discord.Client):
             return
 
         if message.author == self.booster_tutor:
-            if message.channel == self.packs_channel and "```" in message.content:
+            if message.channel == self.packs_channel and message.embeds is not None and "```" in message.embeds[0].description:
                 # Message is a generated pack
                 await self.track_pack(message)
                 return
@@ -427,6 +427,15 @@ class PoolBot(discord.Client):
         If a pack has already been recorded for the current loss, this will _replace_ that pack.
         """
 
+        content = message.embeds[0].description
+        ref = await message.channel.fetch_message(message.reference.message_id)
+        pack_owner_user_id_match = re.search("<@!?(?P<id>\\d+)>", ref.content)
+        pack_owner_user_id = pack_owner_user_id_match and int(pack_owner_user_id_match.group("id"))
+        pack_owner_mention = next(filter(lambda m: m.id == pack_owner_user_id, ref.mentions), None)
+
+        if pack_owner_mention is None:
+            return
+
         # Get sealeddeck link and loss count from spreadsheet
         spreadsheet_values = await self.get_spreadsheet_values('Pools!B7:AA200')
         spreadsheet_formulas = await self.get_spreadsheet_values('Pools!B7:AA200', valueRenderOption="FORMULA")
@@ -440,7 +449,7 @@ class PoolBot(discord.Client):
             curr_row += 1
             if len(row) < 5:
                 continue
-            if row[0].lower() != '' and row[0].lower() in message.mentions[len(message.mentions) - 1].display_name.lower():
+            if row[0].lower() != '' and row[0].lower() in pack_owner_mention.display_name.lower():
                 current_pool = row[3]
                 # Columns T through Z inclusive have extra cards
                 extra_cards = [{"name": card, "count": 1} for card in row[(ord('T') - ord('B')):(ord('Z')-ord('B')+1)] if card != '']
@@ -456,10 +465,10 @@ class PoolBot(discord.Client):
             return
 
         # For LOTR league, there's a special column for fellowship packs
-        if "Fellowship" in message.content:
+        if "Fellowship" in content:
             loss_count = 11
 
-        pack_content = message.content.split("```")[1].strip()
+        pack_content = content.split("```")[1].strip()
         pack_json = arena_to_json(pack_content)
 
         # If this is a double pack, wait for the second pack to be resolved, then treat both as one
@@ -682,7 +691,8 @@ class PoolBot(discord.Client):
 
         await user.send("Understood. Your selection has been noted.")
 
-        await self.track_pack(chosen_message) # TODO MKM verify message format matches, or else refactor & reuse most of it
+        # TODO this likely breaks because booster tutor messages and ours don't follow the same format anymore (embed vs content)
+        await self.track_pack(chosen_message)
 
         return
 
