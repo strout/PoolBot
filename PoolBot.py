@@ -479,14 +479,14 @@ class PoolBot(discord.Client):
             pack_json = await sealeddeck_pool(field.value.replace("`", ""))
 
         # If this is a double pack, wait for the second pack to be resolved, then treat both as one
-        if message.mentions[-1].id in self.double_packs:
-            double_pack = self.double_packs[message.mentions[-1].id]
+        if pack_owner_user_id and pack_owner_user_id in self.double_packs:
+            double_pack = self.double_packs[pack_owner_user_id]
             if len(double_pack) == 0:
                 double_pack.append(pack_json)
                 return
             else:
                 pack_json = [*double_pack[0], *pack_json]
-                del self.double_packs[message.mentions[-1].id]
+                del self.double_packs[pack_owner_user_id]
 
         try:
             new_pack_id = await pool_to_sealeddeck(pack_json)
