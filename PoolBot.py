@@ -171,6 +171,12 @@ class PoolBot(discord.Client):
                 # Edit adds a sealeddeck link
                 await self.track_starting_pool(after)
                 return
+            elif (before.channel == self.packs_channel and len(before.embeds) and len(after.embeds)
+                    and not any(filter(lambda f: f.name == "Sealeddeck.tech ID", before.embeds[0].fields))
+                    and any(filter(lambda f: f.name == "Sealeddeck.tech ID", after.embeds[0].fields))):
+                # track multiple packs in pack-gen channel
+                await self.track_pack(after)
+                return
 
     async def on_message(self, message: discord.Message):
         # As part of the !playerchoice flow, repost Booster Tutor packs in pack-generation with instructions for
@@ -181,7 +187,7 @@ class PoolBot(discord.Client):
             return
 
         if message.author == self.booster_tutor:
-            if message.channel == self.packs_channel and message.embeds is not None and "```" in message.embeds[0].description:
+            if message.channel == self.packs_channel and len(message.embeds) and message.embeds[0].description and "```" in message.embeds[0].description:
                 # Message is a generated pack
                 await self.track_pack(message)
                 return
@@ -461,11 +467,16 @@ class PoolBot(discord.Client):
             return
 
         # For LOTR league, there's a special column for fellowship packs
-        if "Fellowship" in content:
+        if content and "Fellowship" in content:
             loss_count = 11
 
-        pack_content = content.split("```")[1].strip()
-        pack_json = arena_to_json(pack_content)
+        # either it's a single pack or there's a Sealeddeck ID
+        if content and "```" in content:
+            pack_content = content.split("```")[1].strip()
+            pack_json = arena_to_json(pack_content)
+        else:
+            field = next(filter(lambda f: f.name == "Sealeddeck.tech ID", message.embeds[0].fields))
+            pack_json = await sealeddeck_pool(field.value.replace("`", ""))
 
         # If this is a double pack, wait for the second pack to be resolved, then treat both as one
         if message.mentions[-1].id in self.double_packs:
@@ -619,10 +630,6 @@ class PoolBot(discord.Client):
             return
 
         standings_data = await self.get_spreadsheet_values("Standings!E6:T")
-
-        print(repr(standings_data))
-        print(repr(self.pending_lfm_user_id))
-        print(repr(message.author.id))
 
         pending_user_row = next(filter(lambda r: len(r) and r[-1] == str(self.pending_lfm_user_id), standings_data), None)
         challenger_row = next(filter(lambda r: len(r) and r[-1] == str(message.author.id), standings_data), None)
