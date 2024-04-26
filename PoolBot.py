@@ -111,15 +111,18 @@ class PoolBot(discord.Client):
         self.awaiting_boosters_for_user = None
         self.num_boosters_awaiting = None
         self.active_lfm_message = None
+        self.active_duel_message = None
         self.league_committee_channel = None
         self.bot_bunker_channel = None
         self.lfm_channel = None
+        self.duel_channel = None
         self.packs_channel = None
         self.pool_channel = None
         self.side_quest_pools_channel = None
         self.dev_mode = None
         self.pools_tab_id = None
         self.pending_lfm_user_mention = None
+        self.pending_duel_user_mention = None
         self.config = config
         self.league_start = datetime.fromisoformat('2022-06-22')
         self.double_packs: dict[int, Sequence[SealedDeckEntry]] = dict()
@@ -143,9 +146,13 @@ class PoolBot(discord.Client):
         self.league_committee_channel = self.get_channel(1052324453188632696) if not self.dev_mode else self.get_channel(
             1065101182525259866)
         self.side_quest_pools_channel = self.get_channel(1055515435073806387)
+        self.duel_channel = self.get_channel(1206645629250445342) if not self.dev_mode else self.bot_bunker_channel
         self.pending_lfm_user_mention = None
         self.pending_lfm_user_id = None
         self.active_lfm_message = None
+        self.pending_duel_user_mention = None
+        self.pending_duel_user_id = None
+        self.active_duel_message = None
         self.num_boosters_awaiting = 0
         self.awaiting_boosters_for_user = None
         self.spreadsheet_id = self.config.spreadsheet_id
@@ -248,10 +255,12 @@ class PoolBot(discord.Client):
 
         if message.channel == self.lfm_channel and command == '!challenge':
             await self.issue_challenge(message)
+        elif message.channel == self.duel_channel and command == '!challenge':
+            await self.issue_duel_challenge(message)
         elif command == '!help':
             await message.channel.send(
                 f"You can give me one of the following commands:\n"
-                f"> `!challenge`: Challenges the current player in the LFM queue\n"
+                f"> `!challenge`: Challenges the current player in the LFM (or duel) queue\n"
                 f"> `!randint A B`: Generates a random integer n, where A <= n <= B. If only one input is given, "
                 f"uses that value as B and defaults A to 1. \n "
                 f"> `!help`: shows this message\n"
@@ -621,6 +630,35 @@ class PoolBot(discord.Client):
         if self.num_boosters_awaiting == 0:
             self.awaiting_boosters_for_user = None
 
+    async def issue_duel_challenge(self, message: discord.Message):
+        if not self.pending_duel_user_mention:
+            await self.duel_channel.send(
+                "Sorry, but no one is looking for a match right now. You can request an anonymous duel by DMing me "
+                "`!duel`. "
+            )
+            return
+
+        standings_data = await self.get_spreadsheet_values("Standings!E6:T")
+
+        pending_user_row = next(filter(lambda r: len(r) and r[-1] == str(self.pending_duel_user_id), standings_data), None)
+        challenger_row = next(filter(lambda r: len(r) and r[-1] == str(message.author.id), standings_data), None)
+
+        pending_user_team = pending_user_row and pending_user_row[0] and f" ({pending_user_row[0]})" or ""
+        challenger_team = challenger_row and challenger_row[0] and f" ({challenger_row[0]})" or ""
+
+        await self.duel_channel.send(
+            f"{self.pending_duel_user_mention}{pending_user_team}, your anonymous duel has been accepted by {message.author.mention}{challenger_team}.")
+
+        await update_message(
+            self.active_duel_message,
+            f'~~{self.active_duel_message.content}~~\n'
+            f'A match was found between {self.pending_duel_user_mention}{pending_user_team} and {message.author.mention}{challenger_team}.'
+        )
+
+        self.pending_duel_user_mention = None
+        self.pending_duel_user_id = None
+        self.active_duel_message = None
+
     async def issue_challenge(self, message: discord.Message):
         if not self.pending_lfm_user_mention:
             await self.lfm_channel.send(
@@ -703,6 +741,33 @@ class PoolBot(discord.Client):
             await self.choose_pack(message.author, 'B')
             return
 
+        if command == '!duel':
+            if self.pending_duel_user_mention:
+                await message.author.send(
+                    "Someone is already looking for a duel. You can play them by posting !challenge in the "
+                    "looking-for-matches channel of the league discord. "
+                )
+                return
+            if not argument:
+                self.active_duel_message = await self.duel_channel.send(
+                    "An anonymous player is looking for a duel. Post `!challenge` to reveal their identity and "
+                    "initiate a match. "
+                )
+            else:
+                self.active_duel_message = await self.duel_channel.send(
+                    f"An anonymous player is looking for a duel. Post `!challenge` to reveal their identity and "
+                    f"initiate a match.\n "
+                    f"Message from the player:\n"
+                    f"> {argument}"
+                )
+            await message.author.send(
+                f"I've created a post for you. You'll receive a mention when an opponent is found.\n"
+                f"If you want to cancel this, send me a message with the text `!nvm`."
+            )
+            self.pending_duel_user_mention = message.author.mention
+            self.pending_duel_user_id = message.author.id
+            return
+
         if command == '!lfm':
             if self.pending_lfm_user_mention:
                 await message.author.send(
@@ -731,6 +796,7 @@ class PoolBot(discord.Client):
             return
 
         if command == '!retractlfm' or command == '!nvm':
+            handled = False
             if message.author.mention == self.pending_lfm_user_mention:
                 await self.active_lfm_message.delete()
                 self.active_lfm_message = None
@@ -739,16 +805,27 @@ class PoolBot(discord.Client):
                 )
                 self.pending_lfm_user_mention = None
                 self.pending_lfm_user_id = None
-            else:
+                handled = True
+            if message.author.mention == self.pending_duel_user_mention:
+                await self.active_duel_message.delete()
+                self.active_duel_message = None
                 await message.author.send(
-                    "You don't currently have an outgoing LFM."
+                    "Understood. The post made on your behalf has been deleted."
+                )
+                self.pending_duel_user_mention = None
+                self.pending_duel_user_id = None
+                handled = True
+            if not handled:
+                await message.author.send(
+                    "You don't currently have an outgoing LFM or duel."
                 )
             return
 
         await message.author.send(
             f"I'm sorry, but I didn't understand that. Please send one of the following commands:\n"
             f"> `!lfm`: creates an anonymous post looking for a match.\n"
-            f"> `!nvm`: removes an anonymous LFM that you've sent out."
+            f"> `!duel`: creates an anonymous post looking for a duel.\n"
+            f"> `!nvm`: removes an anonymous LFM or duel that you've sent out."
             f"> `!choosePackA`: responds to a pending pack selection option."
             f"> `!choosePackB`: responds to a pending pack selection option."
         )
