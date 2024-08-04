@@ -234,9 +234,9 @@ class PoolBot(discord.Client):
             await self.add_pack(message, argument)
             return
 
-        if command == '!explore' and message.channel == self.packs_channel:
-            await self.explore(message)
-            return
+        # if command == '!explore' and message.channel == self.packs_channel:
+        #     await self.explore(message)
+        #     return
 
         if command == '!collect' and message.channel == self.packs_channel:
             await self.collect(message, argument)
