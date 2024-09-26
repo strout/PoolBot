@@ -667,21 +667,21 @@ class PoolBot(discord.Client):
             )
             return
 
-        standings_data = await self.get_spreadsheet_values("Standings!E6:T")
+        player_data = await self.get_spreadsheet_values("Player Database!D2:W")
 
-        pending_user_row = next(filter(lambda r: len(r) and r[-1] == str(self.pending_lfm_user_id), standings_data), None)
-        challenger_row = next(filter(lambda r: len(r) and r[-1] == str(message.author.id), standings_data), None)
+        pending_user_row = next(filter(lambda r: len(r) and r[0] == str(self.pending_lfm_user_id), player_data), None)
+        challenger_row = next(filter(lambda r: len(r) and r[0] == str(message.author.id), player_data), None)
 
-        pending_user_team = pending_user_row and pending_user_row[0] and f" ({pending_user_row[0]})" or ""
-        challenger_team = challenger_row and challenger_row[0] and f" ({challenger_row[0]})" or ""
+        pending_user_dread = pending_user_row and pending_user_row[-1] and f" (Dread: {pending_user_row[-1]})" or ""
+        challenger_dread = challenger_row and challenger_row[-1] and f" (Dread: {challenger_row[-1]})" or ""
 
         await self.lfm_channel.send(
-            f"{self.pending_lfm_user_mention}{pending_user_team}, your anonymous LFM has been accepted by {message.author.mention}{challenger_team}.")
+            f"{self.pending_lfm_user_mention}{pending_user_dread}, your anonymous LFM has been accepted by {message.author.mention}{challenger_dread}.")
 
         await update_message(
             self.active_lfm_message,
             f'~~{self.active_lfm_message.content}~~\n'
-            f'A match was found between {self.pending_lfm_user_mention}{pending_user_team} and {message.author.mention}{challenger_team}.'
+            f'A match was found between {self.pending_lfm_user_mention}{pending_user_dread} and {message.author.mention}{challenger_dread}.'
         )
 
         self.pending_lfm_user_mention = None
