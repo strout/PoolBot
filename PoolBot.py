@@ -447,14 +447,10 @@ class PoolBot(discord.Client):
         ref = await message.channel.fetch_message(message.reference.message_id)
         pack_owner_user_id_match = re.search("<@!?(?P<id>\\d+)>", ref.content)
         pack_owner_user_id = pack_owner_user_id_match and int(pack_owner_user_id_match.group("id"))
-        pack_owner_mention = next(filter(lambda m: m.id == pack_owner_user_id, ref.mentions), None)
-
-        if pack_owner_mention is None:
-            return
 
         # Get sealeddeck link and loss count from spreadsheet
-        spreadsheet_values = await self.get_spreadsheet_values('Pools!B7:P200')
-        spreadsheet_formulas = await self.get_spreadsheet_values('Pools!B7:P200', valueRenderOption="FORMULA")
+        spreadsheet_values = await self.get_spreadsheet_values('Pools!B7:R200')
+        spreadsheet_formulas = await self.get_spreadsheet_values('Pools!B7:R200', valueRenderOption="FORMULA")
         curr_row = 6
         current_pool = 'Not found'
         loss_count = 0
@@ -463,7 +459,7 @@ class PoolBot(discord.Client):
             curr_row += 1
             if len(row) < 5:
                 continue
-            if row[0].lower() != '' and row[0].lower() in pack_owner_mention.display_name.lower():
+            if str(row[16]) == str(pack_owner_user_id):
                 current_pool = row[3]
                 loss_count = int(row[2])
                 pack_cell_index = ord('F') - ord('B') + loss_count
