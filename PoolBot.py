@@ -7,9 +7,9 @@ import re
 import random
 import time
 from dotenv import load_dotenv
-from typing import Optional, Sequence, Union, List, TypedDict
+from typing import Optional, Sequence, Union, List, TypedDict, Tuple
 from datetime import datetime
-from collections import Counter
+from collections import Counter, defaultdict
 
 import os.path
 
@@ -440,40 +440,26 @@ class PoolBot(discord.Client):
     async def track_pack(self, message: discord.Message):
         """
         Track a pack in the Pools tab. This assumes the pack's owner is the last mention in the message, and that the pack contents is in a code fence.
-        If a pack has already been recorded for the current loss, this will _replace_ that pack.
         """
 
         content = message.embeds[0].description
         ref = await message.channel.fetch_message(message.reference.message_id)
         pack_owner_user_id_match = re.search("<@!?(?P<id>\\d+)>", ref.content)
-        pack_owner_user_id = pack_owner_user_id_match and int(pack_owner_user_id_match.group("id"))
+        pack_owner_user_id = pack_owner_user_id_match and pack_owner_user_id_match.group("id")
 
-        # Get sealeddeck link and loss count from spreadsheet
-        spreadsheet_values = await self.get_spreadsheet_values('Pools!B7:R200')
-        spreadsheet_formulas = await self.get_spreadsheet_values('Pools!B7:R200', valueRenderOption="FORMULA")
-        curr_row = 6
-        current_pool = 'Not found'
-        loss_count = 0
-        pack_to_replace = None
-        for (row, formulas) in zip(spreadsheet_values, spreadsheet_formulas):
-            curr_row += 1
-            if len(row) < 5:
-                continue
-            if str(row[16]) == str(pack_owner_user_id):
-                current_pool = row[3]
-                loss_count = int(row[2])
-                pack_cell_index = ord('F') - ord('B') + loss_count
-                replace_id_match = pack_cell_index < len(formulas) and re.search("\\.tech/(?P<id>[a-zA-Z0-9]*)", formulas[pack_cell_index])
-                pack_to_replace = replace_id_match and replace_id_match.group("id")
-                break
-        if current_pool == 'Not found':
+        # Get (starting) pool links & player info from spreadsheet
+        pools = await self.get_spreadsheet_values('Pools!C7:H')
+        # Get pool changes from spreadsheet
+        changes = await self.get_spreadsheet_values('Pool Changes!B2:D')
+        (row_num, values) = next(((i + 7, vals) for i, vals in enumerate(pools) if vals[0] == pack_owner_user_id), (None, None))
+        if row_num is None or values is None:
             # This should only happen during debugging / spreadsheet setup
-            print("rut row")
+            print(f"rut row. No pool found for {pack_owner_user_id}")
             return
 
-        # For LOTR league, there's a special column for fellowship packs
-        if content and "Fellowship" in content:
-            loss_count = 11
+        name = values[1]
+        current_pool = values[4]
+        starting_pool = values[5]
 
         # either it's a single pack or there's a Sealeddeck ID
         if content and "```" in content:
@@ -498,31 +484,25 @@ class PoolBot(discord.Client):
         except:
             print("sealeddeck issue — generating pack")
             # If something goes wrong with sealeddeck, highlight the pack cell red
-            await self.set_cell_to_red(curr_row, chr(ord('F') + loss_count))
+            await self.set_cell_to_red(row_num, 'G')
             return
 
-        await self.write_pack(new_pack_id, loss_count, curr_row)
+        await self.write_pack(name, new_pack_id)
 
         if current_pool == '':
-            await self.set_cell_to_red(curr_row, chr(ord('F') + loss_count))
+            await self.set_cell_to_red(curr_row, 'G')
             return
 
         try:
-            if not pack_to_replace:
-                # Add pack to pool link
-                updated_pool_id = await pool_to_sealeddeck(
-                    pack_json, current_pool.split('.tech/')[1]
-                )
-            else:
-                pool_contents = await sealeddeck_pool(current_pool.split('.tech/')[1])
-                cards_to_replace = await sealeddeck_pool(pack_to_replace)
-                pool_without_old_cards = remove_cards(pool_contents, cards_to_replace)
-                 # TODO MKM verify that they can just be concatenated not added
-                updated_pool_id = await pool_to_sealeddeck([*pool_without_old_cards, *pack_json])
+            pool = await self.pool_from_changes([row for row in changes if row[0] == name])
+            pool = [*pool, *pack_json]
+            # TODO detect if it's just adding new cards; if so, rebuild off current_pool instead of starting_pool; displays more nicely
+            updated_pool_id = await pool_to_sealeddeck(pool, starting_pool.split('.tech/')[1])
+
         except:
             print("sealeddeck issue — updating pool")
             # If something goes wrong with sealeddeck, highlight the pack cell red
-            await self.set_cell_to_red(curr_row, chr(ord('F') + loss_count))
+            await self.set_cell_to_red(row_num, 'G')
             return
 
         # Write updated extra-card-included pool to spreadsheet
@@ -532,20 +512,43 @@ class PoolBot(discord.Client):
             ],
         }
         self.sheet.values().update(spreadsheetId=self.spreadsheet_id,
-                                   range=f'Pools!E{curr_row}:E{curr_row}', valueInputOption='USER_ENTERED',
+                                   range=f'Pools!G{row_num}', valueInputOption='USER_ENTERED',
                                    body=pool_body).execute()
         return
 
-    async def write_pack(self, new_pack_id: str, loss_count: int, curr_row: int):
+    async def pool_from_changes(self, changes: Sequence[Tuple[str, str, str]]) -> Sequence[SealedDeckEntry]:
+        packs = []
+        cards = defaultdict(int)
+
+        for (_name, operation, value) in changes:
+            if operation == "add pack":
+                packs.append(value)
+            elif operation == "remove pack":
+                packs.remove(value)
+            elif operation == "add card":
+                cards[value] += 1
+            elif operation == "remove card":
+                cards[value] -= 1
+
+        pack_contents = []
+        for id in packs:
+            pack_contents.append(await sealeddeck_pool(id))
+        for pack in pack_contents:
+            if pack:
+                for card in pack:
+                    cards[card["name"]] += card["count"]
+
+        return [{"name": name, "count": count} for name, count in cards.items() if count > 0]
+
+    async def write_pack(self, name: str, new_pack_id: str):
         pack_body = {
             'values': [
-                [f'=HYPERLINK("https://sealeddeck.tech/{new_pack_id}", "Link")'],
+                [datetime.now().isoformat(),name,"add pack",new_pack_id],
             ],
         }
         # Find the proper column ID
-        col = chr(ord('F') + loss_count)
-        self.sheet.values().update(spreadsheetId=self.spreadsheet_id,
-                                   range=f'Pools!{col}{curr_row}:{col}{curr_row}', valueInputOption='USER_ENTERED',
+        self.sheet.values().append(spreadsheetId=self.spreadsheet_id,
+                                   range=f'Pool Changes!A:D', valueInputOption='USER_ENTERED',
                                    body=pack_body).execute()
 
     async def set_cell_to_red(self, row: int, col: str):
