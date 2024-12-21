@@ -173,14 +173,14 @@ class PoolBot(discord.Client):
     async def on_message_edit(self, before: discord.Message, after: discord.Message):
         # Booster tutor adds sealeddeck.tech links as part of an edit operation
         if before.author == self.booster_tutor:
-            if before.channel == self.pool_channel and "Sealeddeck.tech link" not in before.content and\
-                    "Sealeddeck.tech link" in after.content:
+            if before.channel == self.pool_channel and "SealedDeck.Tech link" not in before.content and\
+                    "SealedDeck.Tech Link" in after.content:
                 # Edit adds a sealeddeck link
                 await self.track_starting_pool(after)
                 return
             elif (before.channel == self.packs_channel and len(before.embeds) and len(after.embeds)
-                    and not any(filter(lambda f: f.name == "Sealeddeck.tech ID", before.embeds[0].fields))
-                    and any(filter(lambda f: f.name == "Sealeddeck.tech ID", after.embeds[0].fields))):
+                    and not any(filter(lambda f: f.name == "SealedDeck.Tech ID", before.embeds[0].fields))
+                    and any(filter(lambda f: f.name == "SealedDeck.Tech ID", after.embeds[0].fields))):
                 # track multiple packs in pack-gen channel
                 await self.track_pack(after)
                 return
@@ -194,7 +194,7 @@ class PoolBot(discord.Client):
             return
 
         if message.author == self.booster_tutor:
-            if message.channel == self.packs_channel and len(message.embeds) and message.embeds[0].description and "```" in message.embeds[0].description:
+            if message.channel == self.packs_channel and len(message.embeds) and ((message.embeds[0].description and "```" in message.embeds[0].description) or (any(filter(lambda f: f.name == "SealedDeck.Tech ID", message.embeds[0].fields)))):
                 # Message is a generated pack
                 await self.track_pack(message)
                 return
@@ -466,7 +466,7 @@ class PoolBot(discord.Client):
             pack_content = content.split("```")[1].strip()
             pack_json = arena_to_json(pack_content)
         else:
-            field = next(filter(lambda f: f.name == "Sealeddeck.tech ID", message.embeds[0].fields))
+            field = next(filter(lambda f: f.name == "SealedDeck.Tech ID", message.embeds[0].fields))
             pack_json = await sealeddeck_pool(field.value.replace("`", ""))
 
         # If this is a double pack, wait for the second pack to be resolved, then treat both as one
@@ -671,8 +671,8 @@ class PoolBot(discord.Client):
         pending_user_row = next(filter(lambda r: len(r) and r[0] == str(self.pending_lfm_user_id), player_data), None)
         challenger_row = next(filter(lambda r: len(r) and r[0] == str(message.author.id), player_data), None)
 
-        pending_user_dread = pending_user_row and pending_user_row[-1] and f" (Dread: {pending_user_row[-1]})" or ""
-        challenger_dread = challenger_row and challenger_row[-1] and f" (Dread: {challenger_row[-1]})" or ""
+        pending_user_dread = ""
+        challenger_dread = ""
 
         await self.lfm_channel.send(
             f"{self.pending_lfm_user_mention}{pending_user_dread}, your anonymous LFM has been accepted by {message.author.mention}{challenger_dread}.")
