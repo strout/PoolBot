@@ -490,7 +490,7 @@ class PoolBot(discord.Client):
         await self.write_pack(name, new_pack_id)
 
         if current_pool == '':
-            await self.set_cell_to_red(curr_row, 'G')
+            await self.set_cell_to_red(row_num, 'G')
             return
 
         try:
