@@ -494,10 +494,7 @@ class PoolBot(discord.Client):
             return
 
         try:
-            pool = await self.pool_from_changes([row for row in changes if row[0] == name])
-            pool = [*pool, *pack_json]
-            # TODO detect if it's just adding new cards; if so, rebuild off current_pool instead of starting_pool; displays more nicely
-            updated_pool_id = await pool_to_sealeddeck(pool, starting_pool.split('.tech/')[1])
+            updated_pool_id = await pool_to_sealeddeck(pack_json, current_pool.split('.tech/')[1])
 
         except:
             print("sealeddeck issue — updating pool")
@@ -518,13 +515,14 @@ class PoolBot(discord.Client):
 
     async def pool_from_changes(self, changes: Sequence[Tuple[str, str, str]]) -> Sequence[SealedDeckEntry]:
         packs = []
-        cards = defaultdict(int)
+        removed_packs = []
+        cards: defaultdict[str, int] = defaultdict(int)
 
         for (_name, operation, value) in changes:
             if operation == "add pack":
                 packs.append(value)
             elif operation == "remove pack":
-                packs.remove(value)
+                removed_packs.append(value)
             elif operation == "add card":
                 cards[value] += 1
             elif operation == "remove card":
@@ -537,6 +535,14 @@ class PoolBot(discord.Client):
             if pack:
                 for card in pack:
                     cards[card["name"]] += card["count"]
+
+        removed_pack_contents = []
+        for id in removed_packs:
+            removed_pack_contents.append(await sealeddeck_pool(id))
+        for pack in removed_pack_contents:
+            if pack:
+                for card in pack:
+                    cards[card["name"]] -= card["count"]
 
         return [{"name": name, "count": count} for name, count in cards.items() if count > 0]
 
