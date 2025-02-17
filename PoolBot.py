@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 from typing import Optional, Sequence, Union, List, TypedDict, Tuple
 from datetime import datetime
 from collections import Counter, defaultdict
+from asyncio import Lock
 
 import os.path
 
@@ -126,6 +127,7 @@ class PoolBot(discord.Client):
         self.config = config
         self.league_start = datetime.fromisoformat('2022-06-22')
         self.double_packs: dict[int, Sequence[SealedDeckEntry]] = dict()
+        self.pool_lock = Lock()
         super().__init__(intents=intents, *args, **kwargs)
 
     async def on_ready(self):
@@ -442,76 +444,77 @@ class PoolBot(discord.Client):
         Track a pack in the Pools tab. This assumes the pack's owner is the last mention in the message, and that the pack contents is in a code fence.
         """
 
-        content = message.embeds[0].description
-        ref = await message.channel.fetch_message(message.reference.message_id)
-        pack_owner_user_id_match = re.search("<@!?(?P<id>\\d+)>", ref.content)
-        pack_owner_user_id = pack_owner_user_id_match and pack_owner_user_id_match.group("id")
+        async with self.pool_lock:
+            content = message.embeds[0].description
+            ref = await message.channel.fetch_message(message.reference.message_id)
+            pack_owner_user_id_match = re.search("<@!?(?P<id>\\d+)>", ref.content)
+            pack_owner_user_id = pack_owner_user_id_match and pack_owner_user_id_match.group("id")
 
-        # Get (starting) pool links & player info from spreadsheet
-        pools = await self.get_spreadsheet_values('Pools!C7:H')
-        # Get pool changes from spreadsheet
-        changes = await self.get_spreadsheet_values('Pool Changes!B2:D')
-        (row_num, values) = next(((i + 7, vals) for i, vals in enumerate(pools) if vals[0] == pack_owner_user_id), (None, None))
-        if row_num is None or values is None:
-            # This should only happen during debugging / spreadsheet setup
-            print(f"rut row. No pool found for {pack_owner_user_id}")
-            return
-
-        name = values[1]
-        current_pool = values[4]
-        starting_pool = values[5]
-
-        # either it's a single pack or there's a Sealeddeck ID
-        if content and "```" in content:
-            pack_content = content.split("```")[1].strip()
-            pack_json = arena_to_json(pack_content)
-        else:
-            field = next(filter(lambda f: f.name == "SealedDeck.Tech ID", message.embeds[0].fields))
-            pack_json = await sealeddeck_pool(field.value.replace("`", ""))
-
-        # If this is a double pack, wait for the second pack to be resolved, then treat both as one
-        if pack_owner_user_id and pack_owner_user_id in self.double_packs:
-            double_pack = self.double_packs[pack_owner_user_id]
-            if len(double_pack) == 0:
-                double_pack.append(pack_json)
+            # Get (starting) pool links & player info from spreadsheet
+            pools = await self.get_spreadsheet_values('Pools!C7:H')
+            # Get pool changes from spreadsheet
+            changes = await self.get_spreadsheet_values('Pool Changes!B2:D')
+            (row_num, values) = next(((i + 7, vals) for i, vals in enumerate(pools) if vals[0] == pack_owner_user_id), (None, None))
+            if row_num is None or values is None:
+                # This should only happen during debugging / spreadsheet setup
+                print(f"rut row. No pool found for {pack_owner_user_id}")
                 return
+
+            name = values[1]
+            current_pool = values[4]
+            starting_pool = values[5]
+
+            # either it's a single pack or there's a Sealeddeck ID
+            if content and "```" in content:
+                pack_content = content.split("```")[1].strip()
+                pack_json = arena_to_json(pack_content)
             else:
-                pack_json = [*double_pack[0], *pack_json]
-                del self.double_packs[pack_owner_user_id]
+                field = next(filter(lambda f: f.name == "SealedDeck.Tech ID", message.embeds[0].fields))
+                pack_json = await sealeddeck_pool(field.value.replace("`", ""))
 
-        try:
-            new_pack_id = await pool_to_sealeddeck(pack_json)
-        except:
-            print("sealeddeck issue — generating pack")
-            # If something goes wrong with sealeddeck, highlight the pack cell red
-            await self.set_cell_to_red(row_num, 'G')
+            # If this is a double pack, wait for the second pack to be resolved, then treat both as one
+            if pack_owner_user_id and pack_owner_user_id in self.double_packs:
+                double_pack = self.double_packs[pack_owner_user_id]
+                if len(double_pack) == 0:
+                    double_pack.append(pack_json)
+                    return
+                else:
+                    pack_json = [*double_pack[0], *pack_json]
+                    del self.double_packs[pack_owner_user_id]
+
+            try:
+                new_pack_id = await pool_to_sealeddeck(pack_json)
+            except:
+                print("sealeddeck issue — generating pack")
+                # If something goes wrong with sealeddeck, highlight the pack cell red
+                await self.set_cell_to_red(row_num, 'G')
+                return
+
+            await self.write_pack(name, new_pack_id)
+
+            if current_pool == '':
+                await self.set_cell_to_red(row_num, 'G')
+                return
+
+            try:
+                updated_pool_id = await pool_to_sealeddeck(pack_json, current_pool.split('.tech/')[1])
+
+            except:
+                print("sealeddeck issue — updating pool")
+                # If something goes wrong with sealeddeck, highlight the pack cell red
+                await self.set_cell_to_red(row_num, 'G')
+                return
+
+            # Write updated extra-card-included pool to spreadsheet
+            pool_body = {
+                'values': [
+                    [f'https://sealeddeck.tech/{updated_pool_id}'],
+                ],
+            }
+            self.sheet.values().update(spreadsheetId=self.spreadsheet_id,
+                                       range=f'Pools!G{row_num}', valueInputOption='USER_ENTERED',
+                                       body=pool_body).execute()
             return
-
-        await self.write_pack(name, new_pack_id)
-
-        if current_pool == '':
-            await self.set_cell_to_red(row_num, 'G')
-            return
-
-        try:
-            updated_pool_id = await pool_to_sealeddeck(pack_json, current_pool.split('.tech/')[1])
-
-        except:
-            print("sealeddeck issue — updating pool")
-            # If something goes wrong with sealeddeck, highlight the pack cell red
-            await self.set_cell_to_red(row_num, 'G')
-            return
-
-        # Write updated extra-card-included pool to spreadsheet
-        pool_body = {
-            'values': [
-                [f'https://sealeddeck.tech/{updated_pool_id}'],
-            ],
-        }
-        self.sheet.values().update(spreadsheetId=self.spreadsheet_id,
-                                   range=f'Pools!G{row_num}', valueInputOption='USER_ENTERED',
-                                   body=pool_body).execute()
-        return
 
     async def pool_from_changes(self, changes: Sequence[Tuple[str, str, str]]) -> Sequence[SealedDeckEntry]:
         packs = []
