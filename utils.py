@@ -1,5 +1,6 @@
 from pathlib import Path
 from dataclasses import dataclass
+from typing import Optional
 
 import yaml
 
@@ -10,6 +11,8 @@ class Config:
 	debug_mode: str
 	spreadsheet_id: str
 	pools_tab_id: str
+	second_spreadsheet_id: Optional[str] = None
+	skip_username: Optional[bool] = None
 
 
 def get_config(path: Path = Path("config.yaml")) -> Config:
