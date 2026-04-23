@@ -8,7 +8,7 @@ import random
 import ssl
 import time
 from dotenv import load_dotenv
-from typing import Optional, Sequence, Union, List, TypedDict, Tuple
+from typing import Optional, Sequence, Union, List, TypedDict, Tuple, Any, cast
 from datetime import datetime
 from collections import Counter, defaultdict
 from asyncio import Lock, sleep
@@ -105,7 +105,7 @@ async def message_member(member: Union[discord.Member, discord.User], message: s
     except discord.errors.Forbidden as e:
         print(e)
 
-async def get_sheet_client():
+async def get_sheet_client() -> Any:
     creds = None
     # The file token.json stores the user's access and refresh tokens, and is
     # created automatically when the authorization flow completes for the first
@@ -132,9 +132,9 @@ async def get_sheet_client():
         return service.spreadsheets()
     except HttpError as err:
         print(err)
-    return None
+        raise
 
-async def get_spreadsheet_values(sheet, spreadsheet_id: str, range: str, valueRenderOption="FORMATTED_VALUE"):
+async def get_spreadsheet_values(sheet: Any, spreadsheet_id: str, range: str, valueRenderOption="FORMATTED_VALUE") -> list[list[str]]:
     retries = 0
     while retries < 5:
         try:
@@ -142,14 +142,14 @@ async def get_spreadsheet_values(sheet, spreadsheet_id: str, range: str, valueRe
             result = sheet.values().get(spreadsheetId=spreadsheet_id,
                                         range=range,
                                         valueRenderOption=valueRenderOption).execute()
-            return result.get('values', [])
+            return result.get('values', []) or []
         except ssl.SSLEOFError:
             retries += 1
             await sleep(retries)
-            continue
         except HttpError as err:
             print(err)
-        return []
+            raise
+    return []
 
 async def set_cell_to_red(sheet, spreadsheet_id: str, tab_id: str, row: int, col: str):
     # Note that this request (annoyingly) uses indices instead of the regular cell format.
@@ -214,12 +214,13 @@ class PoolTracker():
 
             # find name from player db (name is column B, discord ID is column F)
             player_data = await get_spreadsheet_values(sheet, self.spreadsheet_id, "Player Database!B2:F")
-            (player_row_index, player_row) = next(filter(lambda r: len(r[1]) > 4 and r[1][4] == str(pack_owner_user_id), enumerate(player_data)), (None, None))
+            match = next(((i, r) for i, r in enumerate(player_data) if len(r) > 1 and len(r[1]) > 4 and r[1][4] == str(pack_owner_user_id)), (None, None))
+            player_row_index, player_row = match
 
             if player_row is None or player_row_index is None:
                 # This should only happen during debugging / spreadsheet setup
                 print(f"rut row. No pool found for {pack_owner_user_id}")
-                return
+                raise ValueError(f"No pool found for {pack_owner_user_id}")
             
             # pool row starts at 7 (1-indexed), player rows start at 0, so add 7 to the index
             row_num = player_row_index + 7
@@ -229,12 +230,12 @@ class PoolTracker():
             current_pool_id = ''
             for change in changes:
                 if len(change) >= 5 and change[0] == name and change[4]:
-                    current_pool_id = change[4]
+                    current_pool_id = str(change[4])
 
             if current_pool_id == '':
                 print(f"rut row. No pool found for {name}")
                 await self.set_cell_to_red(row_num, 'G')
-                return
+                raise ValueError(f"No pool found for {name}")
 
             # either it's a single pack or there's a Sealeddeck ID
             if content and "```" in content:
@@ -242,32 +243,16 @@ class PoolTracker():
                 pack_json = arena_to_json(pack_content)
             else:
                 field = next(filter(lambda f: f.name == "SealedDeck.Tech ID", message.embeds[0].fields))
-                pack_json = await sealeddeck_pool(field.value.replace("`", ""))
+                field_value = field.value or ""
+                pack_json_result = await sealeddeck_pool(field_value.replace("`", ""))
+                if pack_json_result is None:
+                    await self.set_cell_to_red(row_num, 'G')
+                    raise ValueError("Failed to fetch sealeddeck pool")
+                pack_json = pack_json_result
 
-            try:
-                new_pack_id = await pool_to_sealeddeck(pack_json)
-            except:
-                print("sealeddeck issue — generating pack")
-                # If something goes wrong with sealeddeck, highlight the pack cell red
-                await self.set_cell_to_red(row_num, 'G')
-                return
- 
-            try:
-                updated_pool_id = await pool_to_sealeddeck(pack_json, current_pool_id)
-
-            except:
-                print("sealeddeck issue — updating pool")
-                # If something goes wrong with sealeddeck, highlight the pack cell red
-                await self.set_cell_to_red(row_num, 'G')
-                return
-
-            try:
-                await self.write_pack(name, new_pack_id, updated_pool_id)
-            except:
-                print("sealeddeck issue — writing pack")
-                # If something goes wrong with sealeddeck, highlight the pack cell red
-                await self.set_cell_to_red(row_num, 'G')
-                return
+            new_pack_id = await pool_to_sealeddeck(pack_json)
+            updated_pool_id = await pool_to_sealeddeck(pack_json, current_pool_id)
+            await self.write_pack(name, new_pack_id, updated_pool_id)
 
     async def write_pack(self, name: str, new_pack_id: str, updated_pool_id: str):
         sheet = self.sheet or await get_sheet_client()
@@ -296,7 +281,7 @@ class Matchmaker():
         self.extra = extra
         self.sheet = None
         self.pending_user_mention: Optional[str] = None
-        self.pending_user_id: Optional[str] = None
+        self.pending_user_id: Optional[int] = None
         self.active_message: Optional[discord.Message] = None
         self.prefix = prefix or ""
 
@@ -306,6 +291,9 @@ class Matchmaker():
                 f"Sorry, but no one is looking for {self.what_it_is} right now. You can send out an anonymous LFM by DMing me "
                 f"`{self.command}`. "
             )
+            return
+        if self.active_message is None:
+            return
         async with self.channel.typing():
             pending_user_extra = ""
             challenger_extra = ""
@@ -343,16 +331,17 @@ class Matchmaker():
                 f"Message from the player:\n"
                 f"> {argument}"
             )
+        active_message = self.active_message
         await message.author.send(
-            f"I've created a post for you: {self.active_message.jump_url}\n"
+            f"I've created a post for you: {active_message.jump_url}\n"
             "You'll receive a mention when an opponent is found.\n"
             f"If you want to cancel this, send me a message with the text `!nvm`."
         )
         self.pending_user_mention = message.author.mention
-        self.pending_user_id = message.author.id
+        self.pending_user_id = int(message.author.id)
 
-    async def handle_retract(self, message: discord.Message):
-        if message.author.mention == self.pending_user_mention:
+    async def handle_retract(self, message: discord.Message) -> bool:
+        if message.author.mention == self.pending_user_mention and self.active_message is not None:
             await self.active_message.delete()
             self.active_message = None
             await message.author.send(
@@ -363,11 +352,10 @@ class Matchmaker():
             return True
         return False
 
-def has_pack(message: discord.Message):
-    def has_right_name(f #: discord._EmbedFieldProxy
-        ):
+def has_pack(message: discord.Message) -> bool:
+    def has_right_name(f: Any) -> bool:
         return f.name == "SealedDeck.Tech ID"
-    return len(message.embeds) and ((message.embeds[0].description and "```" in message.embeds[0].description) or (any(filter(has_right_name, message.embeds[0].fields))))
+    return len(message.embeds) > 0 and ((message.embeds[0].description and "```" in message.embeds[0].description) or any(filter(has_right_name, message.embeds[0].fields)))
 
 class PoolBot(discord.Client):
     def __init__(self, config: utils.Config, intents: discord.Intents, *args, **kwargs):
@@ -377,32 +365,34 @@ class PoolBot(discord.Client):
 
     async def on_ready(self):
         print(f'{self.user} has connected to Discord!')
-        if not self.config.skip_username:
-            await self.user.edit(username='AGL Bot')
+        if not self.config.skip_username and self.user is not None:
+            result = await self.user.edit(username='AGL Bot')
+            if result is None:
+                raise RuntimeError("Failed to update bot username")
         # If this is true, posts will be limited to #bot-lab and #bot-bunker, and LFM DMs will be ignored.
         self.dev_mode = self.config.debug_mode == "active"
         self.pools_tab_id = self.config.pools_tab_id
-        self.pool_channel = self.get_channel(719933932690472970) if not self.dev_mode else self.get_channel(
-            1065100936445448232)
-        self.packs_channel = self.get_channel(798002275452846111) if not self.dev_mode else self.get_channel(
-            1065101003168436295)
-        self.second_packs_channel = self.get_channel(935295982596423711) if not self.dev_mode else self.get_channel(
-            1065101003168436295) # TODO seaprate dev mode channel?
-        self.lfm_channel = self.get_channel(720338190300348559) if not self.dev_mode else self.get_channel(
-            1065101040770363442)
-        self.bot_bunker_channel = self.get_channel(1000465465572864141) if not self.dev_mode else self.get_channel(
-            1065101076002508800)
+        self.pool_channel: discord.TextChannel = cast(discord.TextChannel, self.get_channel(719933932690472970) if not self.dev_mode else self.get_channel(
+            1065100936445448232))
+        self.packs_channel: discord.TextChannel = cast(discord.TextChannel, self.get_channel(798002275452846111) if not self.dev_mode else self.get_channel(
+            1065101003168436295))
+        self.second_packs_channel: discord.TextChannel = cast(discord.TextChannel, self.get_channel(935295982596423711) if not self.dev_mode else self.get_channel(
+            1065101003168436295)) # TODO seaprate dev mode channel?
+        self.lfm_channel: discord.TextChannel = cast(discord.TextChannel, self.get_channel(720338190300348559) if not self.dev_mode else self.get_channel(
+            1065101040770363442))
+        self.bot_bunker_channel: discord.TextChannel = cast(discord.TextChannel, self.get_channel(1000465465572864141) if not self.dev_mode else self.get_channel(
+            1065101076002508800))
 
-        self.league_committee_channel = self.get_channel(1052324453188632696) if not self.dev_mode else self.get_channel(
-            1065101182525259866)
-        self.side_quest_pools_channel = self.get_channel(1055515435073806387)
-        self.foot_clan_channel = self.get_channel(1206645629250445342) if not self.dev_mode else self.get_channel(
-            1065101076002508800)
+        self.league_committee_channel: discord.TextChannel = cast(discord.TextChannel, self.get_channel(1052324453188632696) if not self.dev_mode else self.get_channel(
+            1065101182525259866))
+        self.side_quest_pools_channel: discord.TextChannel = cast(discord.TextChannel, self.get_channel(1055515435073806387))
+        self.foot_clan_channel: discord.TextChannel = cast(discord.TextChannel, self.get_channel(1206645629250445342) if not self.dev_mode else self.get_channel(
+            1065101076002508800))
         self.num_boosters_awaiting = 0
         self.awaiting_boosters_for_user = None
         self.spreadsheet_id = self.config.spreadsheet_id
         self.pool_tracker = PoolTracker(self.pool_channel, self.packs_channel, self.spreadsheet_id, self.pools_tab_id)
-        self.second_pool_tracker = self.config.second_spreadsheet_id and PoolTracker(self.pool_channel, self.second_packs_channel, self.config.second_spreadsheet_id, self.pools_tab_id)
+        self.second_pool_tracker: Optional[PoolTracker] = PoolTracker(self.pool_channel, self.second_packs_channel, self.config.second_spreadsheet_id, self.pools_tab_id) if self.config.second_spreadsheet_id else None
         self.matchmaker = Matchmaker("!lfm", "a match", self.lfm_channel, self.spreadsheet_id)
         self.foot_clan_matchmaker = Matchmaker("!foot", "a Foot Clan match", self.foot_clan_channel, self.spreadsheet_id, None, "<@&1485338766166986852> ")
         self.matchmakers = [self.matchmaker, self.foot_clan_matchmaker]
@@ -433,7 +423,7 @@ class PoolBot(discord.Client):
                 # track multiple packs in pack-gen channel
                 await self.pool_tracker.track_pack(after)
                 return
-            elif before.channel == self.second_packs_channel and not has_pack(before) and has_pack(after):
+            elif before.channel == self.second_packs_channel and not has_pack(before) and has_pack(after) and self.second_pool_tracker is not None:
                 # track multiple packs in pack-gen channel
                 await self.second_pool_tracker.track_pack(after)
                 return
@@ -451,7 +441,7 @@ class PoolBot(discord.Client):
                 # Message is a generated pack
                 await self.pool_tracker.track_pack(message)
                 return
-            elif message.channel == self.second_packs_channel and has_pack(message):
+            elif message.channel == self.second_packs_channel and has_pack(message) and self.second_pool_tracker is not None:
                 # Message is a generated pack
                 await self.second_pool_tracker.track_pack(message)
                 return
@@ -565,7 +555,8 @@ class PoolBot(discord.Client):
                     return
 
                 # Mark the map as used
-                self.sheet.values().update(spreadsheetId=self.spreadsheet_id,
+                sheet = cast(Any, self.sheet)
+                sheet.values().update(spreadsheetId=self.spreadsheet_id,
                                            range=f'Pools!Q{curr_row}:Q{curr_row}', valueInputOption='USER_ENTERED',
                                            body={'values': [[int(row[15]) + 1]]}).execute()
 
@@ -583,8 +574,10 @@ class PoolBot(discord.Client):
             return
 
         # Use a regex to pull the sealeddeck id out of the message
-        sealed_deck_id = \
-            re.search(r"(?P<url>https?://[^\s]+)", message.content).group("url").split('sealeddeck.tech/')[1]
+        match = re.search(r"(?P<url>https?://[^\s]+)", message.content)
+        if match is None:
+            return
+        sealed_deck_id = match.group("url").split('sealeddeck.tech/')[1]
         sealed_deck_link = f'https://sealeddeck.tech/{sealed_deck_id}'
 
         spreadsheet_values = await self.get_spreadsheet_values('Pools!B7:F200')
@@ -602,10 +595,11 @@ class PoolBot(discord.Client):
                         [sealed_deck_link, sealed_deck_link],
                     ],
                 }
-                self.sheet.values().update(spreadsheetId=self.spreadsheet_id,
+                sheet = cast(Any, self.sheet)
+                sheet.values().update(spreadsheetId=self.spreadsheet_id,
                                            range=f'Pools!E{curr_row}:F{curr_row}', valueInputOption='USER_ENTERED',
                                            body=body).execute()
-                self.sheet.values().update(spreadsheetId=self.spreadsheet_id,
+                sheet.values().update(spreadsheetId=self.spreadsheet_id,
                                            range=f'Pools!S{curr_row}:S{curr_row}', valueInputOption='USER_ENTERED',
                                            body={'values': [[sealed_deck_link]]}).execute()
 
@@ -669,7 +663,7 @@ class PoolBot(discord.Client):
         booster_one_type = message.content.split(None)[1]
         booster_two_type = message.content.split(None)[2]
         self.num_boosters_awaiting = 2
-        self.awaiting_boosters_for_user = message.mentions[0]
+        self.awaiting_boosters_for_user = cast(discord.Member, message.mentions[0])
 
         # Generate two packs of the specified types
         await self.bot_bunker_channel.send(booster_one_type)
@@ -677,16 +671,19 @@ class PoolBot(discord.Client):
 
     async def handle_booster_tutor_response(self, message: discord.Message):
         assert self.num_boosters_awaiting > 0
+        user = self.awaiting_boosters_for_user
+        if user is None:
+            return
         if self.num_boosters_awaiting == 2:
             self.num_boosters_awaiting -= 1
             await self.packs_channel.send(
-                f'Pack Option A for {self.awaiting_boosters_for_user.mention}. To select this pack, DM me '
+                f'Pack Option A for {user.mention}. To select this pack, DM me '
                 f'`!choosePackA`\n '
                 f'```{message.content.split("```")[1].strip()}```')
         else:
             self.num_boosters_awaiting -= 1
             await self.packs_channel.send(
-                f'Pack Option B for {self.awaiting_boosters_for_user.mention}. To select this pack, DM me '
+                f'Pack Option B for {user.mention}. To select this pack, DM me '
                 f'`!choosePackB`\n '
                 f'```{message.content.split("```")[1].strip()}```')
         if self.num_boosters_awaiting == 0:
@@ -701,21 +698,21 @@ class PoolBot(discord.Client):
             not_chosen_option = 'A'
             split = '!choosePackB`'
             not_chosen_split = '!choosePackA`'
-        chosen_message = None
+        chosen_message: Optional[discord.Message] = None
         async for message in self.packs_channel.history(limit=500):
             if (message.author.name == 'AGL Bot' and message.mentions and message.mentions[0] == user
                     and f'Pack Option {chosen_option}' in message.content):
                 chosen_message = message
                 break
 
-        not_chosen_message = None
+        not_chosen_message: Optional[discord.Message] = None
         async for message in self.packs_channel.history(limit=500):
             if (message.author.name == 'AGL Bot' and message.mentions and message.mentions[0] == user
                     and f'Pack Option {not_chosen_option}' in message.content):
                 not_chosen_message = message
                 break
 
-        if not chosen_message or not not_chosen_message:
+        if chosen_message is None or not_chosen_message is None:
             await user.send(
                 f"Sorry, but I couldn't find any pending packs for you. Please post in "
                 f"{self.league_committee_channel.mention} if you think this is an error.")
@@ -723,16 +720,17 @@ class PoolBot(discord.Client):
 
         chosen_message_text = f'Pack chosen by {user.mention}.{chosen_message.content.split(split)[1]}'
 
-        chosen_message = await update_message(chosen_message, chosen_message_text)
+        updated_chosen = await update_message(chosen_message, chosen_message_text)
+        if updated_chosen is None:
+            return
 
-        not_chosen_message = await update_message(not_chosen_message,
-                                                  f'Pack not chosen by {user.mention}.'
-                                                  f'~~{not_chosen_message.content.split(not_chosen_split)[1]}~~')
+        not_chosen_text = f'Pack not chosen by {user.mention}.' f'~~{not_chosen_message.content.split(not_chosen_split)[1]}~~'
+        await update_message(not_chosen_message, not_chosen_text)
 
         await user.send("Understood. Your selection has been noted.")
 
         # TODO this likely breaks because booster tutor messages and ours don't follow the same format anymore (embed vs content)
-        await self.pool_tracker.track_pack(chosen_message)
+        await self.pool_tracker.track_pack(updated_chosen)
 
         return
 
@@ -830,12 +828,12 @@ class PoolBot(discord.Client):
             if not found:
                 print(member.display_name)
 
-    async def message_members(self):
+    async def message_members(self, message: str = ""):
         for member in self.guilds[0].members:
             if member.display_name in 'put names here':
                 print('trying to DM: ' + member.display_name)
                 # if 'Sawyer T' in member.display_name:
-                await message_member(member)
+                await message_member(member, message)
                 print('DMed ' + member.display_name)
 
     async def message_members_not_in_league(self, league_name: str, content: str, sender: Union[discord.Member, discord.User], test_mode=False):
@@ -858,5 +856,5 @@ class PoolBot(discord.Client):
                     count += 1
         await sender.send(f'Successfully DMed {count} user(s).')
 
-    async def get_spreadsheet_values(self, range: str, valueRenderOption="FORMATTED_VALUE"):
-        await get_spreadsheet_values(self.spreadsheet_id, range, valueRenderOption)
+    async def get_spreadsheet_values(self, range: str, valueRenderOption="FORMATTED_VALUE") -> list[list[str]]:
+        return await get_spreadsheet_values(self.sheet, self.spreadsheet_id, range, valueRenderOption)

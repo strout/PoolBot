@@ -1,0 +1,15 @@
+{
+  "executionEnvironments": [
+    {
+      "root": ".",
+      "extraPaths": ["."]
+    }
+  ],
+  "include": ["PoolBot.py", "utils.py", "__main__.py"],
+  "exclude": [".venv", "**/__pycache__"],
+  "typeCheckingMode": "basic",
+  "pythonVersion": "3.12",
+  "reportMissingImports": "warning",
+  "reportMissingTypeStubs": false,
+  "useLibraryCodeForTypes": true
+}
