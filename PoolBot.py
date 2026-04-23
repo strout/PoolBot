@@ -28,6 +28,28 @@ load_dotenv()
 
 SEALEDDECK_URL = "https://sealeddeck.tech/api/pools"
 
+
+class PoolBotError(Exception):
+    """Base exception for PoolBot errors"""
+    pass
+
+
+class SealedDeckError(PoolBotError):
+    """Error when sealeddeck.tech API fails"""
+    pass
+
+
+class SpreadsheetError(PoolBotError):
+    """Error when spreadsheet operations fail"""
+    pass
+
+
+def parse_sealeddeck_url(content: str) -> Optional[str]:
+    """Extract sealeddeck ID from message content. Returns None if not found."""
+    match = re.search(r"https?://(?:www\.)?sealeddeck\.tech/([^/\s]+)", content)
+    return match.group(1) if match else None
+
+
 class SealedDeckEntry(TypedDict):
     name: str
     count: int
@@ -50,7 +72,8 @@ def remove_cards(pool: Sequence[SealedDeckEntry], cards_to_remove: Sequence[Seal
         counted[card["name"]] -= card["count"]
     return [{"name": name, "count": count} for name, count in counted.items() if count > 0]
 
-async def sealeddeck_pool(pool_sealeddeck_id: str) -> Optional[Sequence[SealedDeckEntry]]:
+async def sealeddeck_pool(pool_sealeddeck_id: str) -> Sequence[SealedDeckEntry]:
+    """Fetch pool data from sealeddeck.tech. Raises SealedDeckError on failure."""
     resp_json = None
 
     for attempt in range(3):
@@ -59,20 +82,22 @@ async def sealeddeck_pool(pool_sealeddeck_id: str) -> Optional[Sequence[SealedDe
                 async with session.get(f"{SEALEDDECK_URL}/{pool_sealeddeck_id}") as resp:
                     resp.raise_for_status()
                     resp_json = await resp.json()
-        except:
+        except Exception as e:
+            if attempt == 2:
+                raise SealedDeckError(f"Failed to fetch pool {pool_sealeddeck_id} after 3 attempts: {e}")
             continue
         else:
             break
 
-    if resp_json is not None:
-        return [*resp_json["sideboard"], *resp_json["deck"], *resp_json["hidden"]]
-    else:
-        return None
+    if resp_json is None:
+        raise SealedDeckError(f"Received null response for pool {pool_sealeddeck_id}")
+
+    return [*resp_json["sideboard"], *resp_json["deck"], *resp_json["hidden"]]
 
 async def pool_to_sealeddeck(
         punishment_cards: Sequence[SealedDeckEntry], pool_sealeddeck_id: Optional[str] = None
 ) -> str:
-    """Adds punishment cards to a sealeddeck.tech pool and returns the id"""
+    """Adds punishment cards to a sealeddeck.tech pool and returns the id. Raises SealedDeckError on failure."""
     deck: dict[str, Union[Sequence[SealedDeckEntry], str]] = {"sideboard": punishment_cards}
     if pool_sealeddeck_id:
         deck["poolId"] = pool_sealeddeck_id
@@ -83,17 +108,22 @@ async def pool_to_sealeddeck(
                 async with session.post(SEALEDDECK_URL, json=deck) as resp:
                     resp.raise_for_status()
                     resp_json = await resp.json()
-        except:
+        except Exception as e:
+            if attempt == 2:
+                raise SealedDeckError(f"Failed to create pool after 3 attempts: {e}")
             continue
         else:
             break
 
-    return resp_json["poolId"]
+    return str(resp_json["poolId"])
 
 
-async def update_message(message: discord.Message, new_content: str):
-    """Updates the text contents of a sent bot message"""
-    return await message.edit(content=new_content)
+async def update_message(message: discord.Message, new_content: str) -> discord.Message:
+    """Updates the text contents of a sent bot message. Raises on failure."""
+    result = await message.edit(content=new_content)
+    if result is None:
+        raise PoolBotError(f"Failed to update message {message.id}")
+    return result
 
 
 async def message_member(member: Union[discord.Member, discord.User], message: str):
@@ -244,11 +274,7 @@ class PoolTracker():
             else:
                 field = next(filter(lambda f: f.name == "SealedDeck.Tech ID", message.embeds[0].fields))
                 field_value = field.value or ""
-                pack_json_result = await sealeddeck_pool(field_value.replace("`", ""))
-                if pack_json_result is None:
-                    await self.set_cell_to_red(row_num, 'G')
-                    raise ValueError("Failed to fetch sealeddeck pool")
-                pack_json = pack_json_result
+                pack_json = await sealeddeck_pool(field_value.replace("`", ""))  # Raises SealedDeckError on failure
 
             new_pack_id = await pool_to_sealeddeck(pack_json)
             updated_pool_id = await pool_to_sealeddeck(pack_json, current_pool_id)
@@ -286,6 +312,7 @@ class Matchmaker():
         self.prefix = prefix or ""
 
     async def issue_challenge(self, message: discord.Message):
+        """Handle challenge command. Early returns if no pending user or active message."""
         if not self.pending_user_mention:
             await self.channel.send(
                 f"Sorry, but no one is looking for {self.what_it_is} right now. You can send out an anonymous LFM by DMing me "
@@ -293,18 +320,17 @@ class Matchmaker():
             )
             return
         if self.active_message is None:
-            return
+            return  # Shouldn't happen if pending_user_mention is set, but guard anyway
         async with self.channel.typing():
             pending_user_extra = ""
             challenger_extra = ""
-
             overall_extra = self.extra() if self.extra else ""
 
             await self.channel.send(
                 f"{self.pending_user_mention}{pending_user_extra}, your anonymous LFM has been accepted by {message.author.mention}{challenger_extra}.{overall_extra}")
 
             await update_message(
-                self.active_message,
+                self.active_message,  # type is already narrowed by the None check above
                 f'~~{self.active_message.content}~~\n'
                 f'A match was found between {self.pending_user_mention}{pending_user_extra} and {message.author.mention}{challenger_extra}.'
             )
@@ -353,15 +379,25 @@ class Matchmaker():
         return False
 
 def has_pack(message: discord.Message) -> bool:
-    def has_right_name(f: Any) -> bool:
-        return f.name == "SealedDeck.Tech ID"
-    return len(message.embeds) > 0 and ((message.embeds[0].description and "```" in message.embeds[0].description) or any(filter(has_right_name, message.embeds[0].fields)))
+    """Check if message contains pack data. Raises IndexError if no embeds."""
+    embed = message.embeds[0]  # Let IndexError propagate if no embeds
+    has_code_block = embed.description and "```" in embed.description
+    has_field = any(f.name == "SealedDeck.Tech ID" for f in embed.fields)
+    return has_code_block or has_field
 
 class PoolBot(discord.Client):
     def __init__(self, config: utils.Config, intents: discord.Intents, *args, **kwargs):
         self.config = config
         self.league_start = datetime.fromisoformat('2022-06-22')
         super().__init__(intents=intents, *args, **kwargs)
+
+    def _get_channel(self, channel_id: int, dev_mode: bool, dev_id: int) -> discord.TextChannel:
+        """Get a channel by ID, validating it exists and is a TextChannel. Raises on failure."""
+        target_id = channel_id if not dev_mode else dev_id
+        channel = self.get_channel(target_id)
+        if channel is None or not isinstance(channel, discord.TextChannel):
+            raise RuntimeError(f"Required channel {target_id} not found or is not a TextChannel")
+        return channel
 
     async def on_ready(self):
         print(f'{self.user} has connected to Discord!')
@@ -372,22 +408,16 @@ class PoolBot(discord.Client):
         # If this is true, posts will be limited to #bot-lab and #bot-bunker, and LFM DMs will be ignored.
         self.dev_mode = self.config.debug_mode == "active"
         self.pools_tab_id = self.config.pools_tab_id
-        self.pool_channel: discord.TextChannel = cast(discord.TextChannel, self.get_channel(719933932690472970) if not self.dev_mode else self.get_channel(
-            1065100936445448232))
-        self.packs_channel: discord.TextChannel = cast(discord.TextChannel, self.get_channel(798002275452846111) if not self.dev_mode else self.get_channel(
-            1065101003168436295))
-        self.second_packs_channel: discord.TextChannel = cast(discord.TextChannel, self.get_channel(935295982596423711) if not self.dev_mode else self.get_channel(
-            1065101003168436295)) # TODO seaprate dev mode channel?
-        self.lfm_channel: discord.TextChannel = cast(discord.TextChannel, self.get_channel(720338190300348559) if not self.dev_mode else self.get_channel(
-            1065101040770363442))
-        self.bot_bunker_channel: discord.TextChannel = cast(discord.TextChannel, self.get_channel(1000465465572864141) if not self.dev_mode else self.get_channel(
-            1065101076002508800))
 
-        self.league_committee_channel: discord.TextChannel = cast(discord.TextChannel, self.get_channel(1052324453188632696) if not self.dev_mode else self.get_channel(
-            1065101182525259866))
-        self.side_quest_pools_channel: discord.TextChannel = cast(discord.TextChannel, self.get_channel(1055515435073806387))
-        self.foot_clan_channel: discord.TextChannel = cast(discord.TextChannel, self.get_channel(1206645629250445342) if not self.dev_mode else self.get_channel(
-            1065101076002508800))
+        # Get all required channels at startup - fail fast if any are missing
+        self.pool_channel = self._get_channel(719933932690472970, self.dev_mode, 1065100936445448232)
+        self.packs_channel = self._get_channel(798002275452846111, self.dev_mode, 1065101003168436295)
+        self.second_packs_channel = self._get_channel(935295982596423711, self.dev_mode, 1065101003168436295)
+        self.lfm_channel = self._get_channel(720338190300348559, self.dev_mode, 1065101040770363442)
+        self.bot_bunker_channel = self._get_channel(1000465465572864141, self.dev_mode, 1065101076002508800)
+        self.league_committee_channel = self._get_channel(1052324453188632696, self.dev_mode, 1065101182525259866)
+        self.side_quest_pools_channel = self._get_channel(1055515435073806387, self.dev_mode, 1055515435073806387)
+        self.foot_clan_channel = self._get_channel(1206645629250445342, self.dev_mode, 1065101076002508800)
         self.num_boosters_awaiting = 0
         self.awaiting_boosters_for_user = None
         self.spreadsheet_id = self.config.spreadsheet_id
@@ -573,11 +603,10 @@ class PoolBot(discord.Client):
             # TODO: highlight the pool cell red and DM someone if this happens
             return
 
-        # Use a regex to pull the sealeddeck id out of the message
-        match = re.search(r"(?P<url>https?://[^\s]+)", message.content)
-        if match is None:
+        # Parse sealeddeck URL at boundary
+        sealed_deck_id = parse_sealeddeck_url(message.content)
+        if sealed_deck_id is None:
             return
-        sealed_deck_id = match.group("url").split('sealeddeck.tech/')[1]
         sealed_deck_link = f'https://sealeddeck.tech/{sealed_deck_id}'
 
         spreadsheet_values = await self.get_spreadsheet_values('Pools!B7:F200')
@@ -609,6 +638,7 @@ class PoolBot(discord.Client):
 
 
     async def pool_from_changes(self, changes: Sequence[Tuple[str, str, str]]) -> Sequence[SealedDeckEntry]:
+        """Reconstruct pool from change history. Raises SealedDeckError if any pack fetch fails."""
         packs = []
         removed_packs = []
         cards: defaultdict[str, int] = defaultdict(int)
@@ -623,21 +653,16 @@ class PoolBot(discord.Client):
             elif operation == "remove card":
                 cards[value] -= 1
 
-        pack_contents = []
-        for id in packs:
-            pack_contents.append(await sealeddeck_pool(id))
-        for pack in pack_contents:
-            if pack:
-                for card in pack:
-                    cards[card["name"]] += card["count"]
+        # Fetch and aggregate pack contents - sealeddeck_pool raises on failure
+        for pack_id in packs:
+            pack = await sealeddeck_pool(pack_id)
+            for card in pack:
+                cards[card["name"]] += card["count"]
 
-        removed_pack_contents = []
-        for id in removed_packs:
-            removed_pack_contents.append(await sealeddeck_pool(id))
-        for pack in removed_pack_contents:
-            if pack:
-                for card in pack:
-                    cards[card["name"]] -= card["count"]
+        for pack_id in removed_packs:
+            pack = await sealeddeck_pool(pack_id)
+            for card in pack:
+                cards[card["name"]] -= card["count"]
 
         return [{"name": name, "count": count} for name, count in cards.items() if count > 0]
 
@@ -670,10 +695,10 @@ class PoolBot(discord.Client):
         await self.bot_bunker_channel.send(booster_two_type)
 
     async def handle_booster_tutor_response(self, message: discord.Message):
-        assert self.num_boosters_awaiting > 0
+        """Handle booster tutor pack generation response. Assumes called only when awaiting boosters."""
+        assert self.num_boosters_awaiting > 0, "Called without pending boosters"
+        assert self.awaiting_boosters_for_user is not None, "No user awaiting boosters"
         user = self.awaiting_boosters_for_user
-        if user is None:
-            return
         if self.num_boosters_awaiting == 2:
             self.num_boosters_awaiting -= 1
             await self.packs_channel.send(
@@ -720,19 +745,14 @@ class PoolBot(discord.Client):
 
         chosen_message_text = f'Pack chosen by {user.mention}.{chosen_message.content.split(split)[1]}'
 
-        updated_chosen = await update_message(chosen_message, chosen_message_text)
-        if updated_chosen is None:
-            return
-
+        updated_chosen = await update_message(chosen_message, chosen_message_text)  # Raises on failure
         not_chosen_text = f'Pack not chosen by {user.mention}.' f'~~{not_chosen_message.content.split(not_chosen_split)[1]}~~'
-        await update_message(not_chosen_message, not_chosen_text)
+        await update_message(not_chosen_message, not_chosen_text)  # Raises on failure
 
         await user.send("Understood. Your selection has been noted.")
 
         # TODO this likely breaks because booster tutor messages and ours don't follow the same format anymore (embed vs content)
         await self.pool_tracker.track_pack(updated_chosen)
-
-        return
 
     async def on_dm(self, message: discord.Message, command: str, argument: str):
         if command == '!choosepacka' or command == '!chooseurza':
