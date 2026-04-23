@@ -32,11 +32,6 @@ class SealedDeckEntry(TypedDict):
     name: str
     count: int
 
-def choose_stip():
-    stips = ["Pauper", "Companion: Gyruda", "Companion: Obosh", "Companion: Keruga", "Companion: Lurrus", "Companion: Yorion"]
-    stip = random.choice(stips)
-    return "\nStipulation: " + stip
-
 def arena_to_json(arena_list: str) -> Sequence[SealedDeckEntry]:
     """Convert a list of cards in arena format to a list of json cards"""
     json_list: List[SealedDeckEntry] = []
@@ -293,7 +288,7 @@ class PoolTracker():
         await set_cell_to_red(self.sheet, self.spreadsheet_id, self.tab_id, row, col)
 
 class Matchmaker():
-    def __init__(self, command: str, what_it_is: str, channel: discord.TextChannel, spreadsheet_id: str, extra=None):
+    def __init__(self, command: str, what_it_is: str, channel: discord.TextChannel, spreadsheet_id: str, extra=None, prefix=None):
         self.command = command
         self.what_it_is = what_it_is
         self.channel = channel
@@ -303,6 +298,7 @@ class Matchmaker():
         self.pending_user_mention: Optional[str] = None
         self.pending_user_id: Optional[str] = None
         self.active_message: Optional[discord.Message] = None
+        self.prefix = prefix or ""
 
     async def issue_challenge(self, message: discord.Message):
         if not self.pending_user_mention:
@@ -310,31 +306,9 @@ class Matchmaker():
                 f"Sorry, but no one is looking for {self.what_it_is} right now. You can send out an anonymous LFM by DMing me "
                 f"`{self.command}`. "
             )
-            return
-
         async with self.channel.typing():
-            sheet = self.sheet or await get_sheet_client()
-            if not self.sheet:
-                self.sheet = sheet
-
-            player_data = await get_spreadsheet_values(sheet, self.spreadsheet_id, "Player Database!C2:W")
-
-            factions = {
-                "Fire Nation": "🔥",
-                "Water Tribes": "🌊",
-                "Air Nomads": "🌪️",
-                "Order of the White Lotus": "🪷",
-                "Swampbenders": "🍄",
-                "Kyoshi Warriors": "🪭",
-                "Dai Li": "🕵️",
-                "Sun Warriors": "🌞",
-            }
-
-            pending_user_row = next(filter(lambda r: len(r) > 3 and r[3] == str(self.pending_user_id), player_data), None)
-            challenger_row = next(filter(lambda r: len(r) > 3 and r[3] == str(message.author.id), player_data), None)
-
-            pending_user_extra = "" # pending_user_row and pending_user_row[0] and pending_user_row[0] in factions and factions[pending_user_row[0]] or ""
-            challenger_extra =  "" # challenger_row and challenger_row[0] and challenger_row[0] in factions and factions[challenger_row[0]] or ""
+            pending_user_extra = ""
+            challenger_extra = ""
 
             overall_extra = self.extra() if self.extra else ""
 
@@ -359,12 +333,12 @@ class Matchmaker():
             return
         if not argument:
             self.active_message = await self.channel.send(
-                f"An anonymous player is looking for {self.what_it_is}. Post `!challenge` to reveal their identity and "
+                f"{self.prefix}An anonymous player is looking for {self.what_it_is}. Post `!challenge` to reveal their identity and "
                 f"initiate {self.what_it_is}. "
             )
         else:
             self.active_message = await self.channel.send(
-                f"An anonymous player is looking for {self.what_it_is}. Post `!challenge` to reveal their identity and "
+                f"{self.prefix}An anonymous player is looking for {self.what_it_is}. Post `!challenge` to reveal their identity and "
                 f"initiate {self.what_it_is}.\n "
                 f"Message from the player:\n"
                 f"> {argument}"
@@ -422,7 +396,7 @@ class PoolBot(discord.Client):
         self.league_committee_channel = self.get_channel(1052324453188632696) if not self.dev_mode else self.get_channel(
             1065101182525259866)
         self.side_quest_pools_channel = self.get_channel(1055515435073806387)
-        self.stip_channel = self.get_channel(1029841228604375120) if not self.dev_mode else self.get_channel(
+        self.foot_clan_channel = self.get_channel(1206645629250445342) if not self.dev_mode else self.get_channel(
             1065101076002508800)
         self.num_boosters_awaiting = 0
         self.awaiting_boosters_for_user = None
@@ -430,8 +404,8 @@ class PoolBot(discord.Client):
         self.pool_tracker = PoolTracker(self.pool_channel, self.packs_channel, self.spreadsheet_id, self.pools_tab_id)
         self.second_pool_tracker = self.config.second_spreadsheet_id and PoolTracker(self.pool_channel, self.second_packs_channel, self.config.second_spreadsheet_id, self.pools_tab_id)
         self.matchmaker = Matchmaker("!lfm", "a match", self.lfm_channel, self.spreadsheet_id)
-        self.stip_matchmaker = Matchmaker("!stipmatch", "a Wheel of Chaos match", self.stip_channel, self.spreadsheet_id, choose_stip)
-        self.matchmakers = [self.matchmaker, self.stip_matchmaker]
+        self.foot_clan_matchmaker = Matchmaker("!foot", "a Foot Clan match", self.foot_clan_channel, self.spreadsheet_id, None, "<@&1485338766166986852> ")
+        self.matchmakers = [self.matchmaker, self.foot_clan_matchmaker]
         for user in self.users:
             if user.name == 'Booster Tutor':
                 self.booster_tutor = user
@@ -790,7 +764,7 @@ class PoolBot(discord.Client):
         await message.author.send(
             f"I'm sorry, but I didn't understand that. Please send one of the following commands:\n"
             f"> `{self.matchmaker.command}`: creates an anonymous post looking for {self.matchmaker.what_it_is}.\n"
-            f"> `{self.stip_matchmaker.command}`: creates an anonymous post looking for {self.stip_matchmaker.what_it_is}.\n"
+            f"> `{self.foot_clan_matchmaker.command}`: creates an anonymous post looking for {self.foot_clan_matchmaker.what_it_is}.\n"
             f"> `!nvm`: removes an anonymous LFM that you've sent out.\n"
             f"> `!choosePackA`: responds to a pending pack selection option.\n"
             f"> `!choosePackB`: responds to a pending pack selection option."
