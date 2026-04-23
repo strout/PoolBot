@@ -8,7 +8,7 @@ import random
 import ssl
 import time
 from dotenv import load_dotenv
-from typing import Optional, Sequence, Union, List, TypedDict, Tuple, Any, cast
+from typing import Optional, Sequence, Union, List, TypedDict, Tuple, Any
 from datetime import datetime
 from collections import Counter, defaultdict
 from asyncio import Lock, sleep
@@ -215,24 +215,18 @@ async def set_cell_to_red(sheet, spreadsheet_id: str, tab_id: str, row: int, col
                       body=color_body).execute()
 
 class PoolTracker():
-    def __init__(self, pool_channel: discord.TextChannel, packs_channel: discord.TextChannel, spreadsheet_id: str, tab_id: str):
+    def __init__(self, sheet: Any, pool_channel: discord.TextChannel, packs_channel: discord.TextChannel, spreadsheet_id: str, tab_id: str):
+        self.sheet = sheet
         self.pool_channel = pool_channel
         self.packs_channel = packs_channel
         self.spreadsheet_id = spreadsheet_id
         self.tab_id = tab_id
         self.pool_lock = Lock()
-        self.sheet = None
-        pass
 
     async def track_pack(self, message: discord.Message):
         """
         Track a pack in the Pools tab. This assumes the pack's owner is the last mention in the message, and that the pack contents is in a code fence.
         """
-
-        sheet = self.sheet or await get_sheet_client()
-        if not self.sheet:
-            self.sheet = sheet
-
         async with self.pool_lock:
             content = message.embeds[0].description
             ref = message.reference and message.reference.message_id and await message.channel.fetch_message(message.reference.message_id)
@@ -240,10 +234,10 @@ class PoolTracker():
             pack_owner_user_id = pack_owner_user_id_match and pack_owner_user_id_match.group("id")
 
             # Get pool changes from spreadsheet
-            changes = await get_spreadsheet_values(sheet, self.spreadsheet_id, 'Pool Changes!B2:F')
+            changes = await get_spreadsheet_values(self.sheet, self.spreadsheet_id, 'Pool Changes!B2:F')
 
             # find name from player db (name is column B, discord ID is column F)
-            player_data = await get_spreadsheet_values(sheet, self.spreadsheet_id, "Player Database!B2:F")
+            player_data = await get_spreadsheet_values(self.sheet, self.spreadsheet_id, "Player Database!B2:F")
             match = next(((i, r) for i, r in enumerate(player_data) if len(r) > 1 and len(r[1]) > 4 and r[1][4] == str(pack_owner_user_id)), (None, None))
             player_row_index, player_row = match
 
@@ -281,17 +275,13 @@ class PoolTracker():
             await self.write_pack(name, new_pack_id, updated_pool_id)
 
     async def write_pack(self, name: str, new_pack_id: str, updated_pool_id: str):
-        sheet = self.sheet or await get_sheet_client()
-        if not self.sheet:
-            self.sheet = sheet
-
         pack_body = {
             'values': [
                 [datetime.now().isoformat(),name,"add pack",new_pack_id,"",updated_pool_id],
             ],
         }
         # Find the proper column ID
-        sheet.values().append(spreadsheetId=self.spreadsheet_id,
+        self.sheet.values().append(spreadsheetId=self.spreadsheet_id,
                                    range=f'Pool Changes!A:D', valueInputOption='USER_ENTERED',
                                    body=pack_body).execute()
 
@@ -419,17 +409,22 @@ class PoolBot(discord.Client):
         self.side_quest_pools_channel = self._get_channel(1055515435073806387, self.dev_mode, 1055515435073806387)
         self.foot_clan_channel = self._get_channel(1206645629250445342, self.dev_mode, 1065101076002508800)
         self.num_boosters_awaiting = 0
-        self.awaiting_boosters_for_user = None
+        self.awaiting_boosters_for_user: Optional[Union[discord.Member, discord.User]] = None
         self.spreadsheet_id = self.config.spreadsheet_id
-        self.pool_tracker = PoolTracker(self.pool_channel, self.packs_channel, self.spreadsheet_id, self.pools_tab_id)
-        self.second_pool_tracker: Optional[PoolTracker] = PoolTracker(self.pool_channel, self.second_packs_channel, self.config.second_spreadsheet_id, self.pools_tab_id) if self.config.second_spreadsheet_id else None
+
+        # Get sheet client first - fail fast if it fails
+        self.sheet = await get_sheet_client()
+
+        # Pass sheet to PoolTracker - explicit dependencies
+        self.pool_tracker = PoolTracker(self.sheet, self.pool_channel, self.packs_channel, self.spreadsheet_id, self.pools_tab_id)
+        self.second_pool_tracker: Optional[PoolTracker] = PoolTracker(self.sheet, self.pool_channel, self.second_packs_channel, self.config.second_spreadsheet_id, self.pools_tab_id) if self.config.second_spreadsheet_id else None
+
         self.matchmaker = Matchmaker("!lfm", "a match", self.lfm_channel, self.spreadsheet_id)
         self.foot_clan_matchmaker = Matchmaker("!foot", "a Foot Clan match", self.foot_clan_channel, self.spreadsheet_id, None, "<@&1485338766166986852> ")
         self.matchmakers = [self.matchmaker, self.foot_clan_matchmaker]
         for user in self.users:
             if user.name == 'Booster Tutor':
                 self.booster_tutor = user
-        self.sheet = await get_sheet_client()
         #
         # for member in self.guilds[0].members:
         #     if member.bot:
@@ -585,8 +580,7 @@ class PoolBot(discord.Client):
                     return
 
                 # Mark the map as used
-                sheet = cast(Any, self.sheet)
-                sheet.values().update(spreadsheetId=self.spreadsheet_id,
+                self.sheet.values().update(spreadsheetId=self.spreadsheet_id,
                                            range=f'Pools!Q{curr_row}:Q{curr_row}', valueInputOption='USER_ENTERED',
                                            body={'values': [[int(row[15]) + 1]]}).execute()
 
@@ -624,11 +618,10 @@ class PoolBot(discord.Client):
                         [sealed_deck_link, sealed_deck_link],
                     ],
                 }
-                sheet = cast(Any, self.sheet)
-                sheet.values().update(spreadsheetId=self.spreadsheet_id,
+                self.sheet.values().update(spreadsheetId=self.spreadsheet_id,
                                            range=f'Pools!E{curr_row}:F{curr_row}', valueInputOption='USER_ENTERED',
                                            body=body).execute()
-                sheet.values().update(spreadsheetId=self.spreadsheet_id,
+                self.sheet.values().update(spreadsheetId=self.spreadsheet_id,
                                            range=f'Pools!S{curr_row}:S{curr_row}', valueInputOption='USER_ENTERED',
                                            body={'values': [[sealed_deck_link]]}).execute()
 
@@ -688,7 +681,7 @@ class PoolBot(discord.Client):
         booster_one_type = message.content.split(None)[1]
         booster_two_type = message.content.split(None)[2]
         self.num_boosters_awaiting = 2
-        self.awaiting_boosters_for_user = cast(discord.Member, message.mentions[0])
+        self.awaiting_boosters_for_user = message.mentions[0]
 
         # Generate two packs of the specified types
         await self.bot_bunker_channel.send(booster_one_type)
@@ -813,10 +806,8 @@ class PoolBot(discord.Client):
             f":hourglass: Adding pack to pool..."
         )
         try:
-            new_id = await pool_to_sealeddeck(
-                pack_json, sealeddeck_id
-            )
-        except aiohttp.ClientResponseError as e:
+            new_id = await pool_to_sealeddeck(pack_json, sealeddeck_id)
+        except SealedDeckError as e:
             print(f"Sealeddeck error: {e}")
             content = (
                 f"{message.author.mention}\n"
@@ -826,15 +817,16 @@ class PoolBot(discord.Client):
                 f"If the ID is correct, sealeddeck.tech might be "
                 f"having some issues right now, try again later."
             )
+            await m.edit(content=content)
+            return
 
-        else:
-            content = (
-                f"{message.author.mention}\n"
-                f"The packs have been added to the pool.\n\n"
-                f"**Updated sealeddeck.tech pool**\n"
-                f"link: https://sealeddeck.tech/{new_id}\n"
-                f"ID: `{new_id}`"
-            )
+        content = (
+            f"{message.author.mention}\n"
+            f"The packs have been added to the pool.\n\n"
+            f"**Updated sealeddeck.tech pool**\n"
+            f"link: https://sealeddeck.tech/{new_id}\n"
+            f"ID: `{new_id}`"
+        )
         await m.edit(content=content)
 
     async def print_members_not_in_league(self, league_name: str):
