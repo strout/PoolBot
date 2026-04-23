@@ -145,3 +145,5 @@ img
 
 # test notebooks
 *.ipynb
+
+.direnv
