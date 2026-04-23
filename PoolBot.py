@@ -54,6 +54,71 @@ class SealedDeckEntry(TypedDict):
     name: str
     count: int
 
+
+# Spreadsheet data structures
+class PlayerDatabaseRow(TypedDict):
+    name: str
+    discord_id: int
+
+
+class PoolChangeRow(TypedDict):
+    name: str
+    operation: str
+    value: str
+    pool_id: str
+
+
+class PoolRow(TypedDict, total=False):
+    """Row from Pools tab - not all columns are always present"""
+    name: str
+    pool_id: str
+    pack_count: int
+    map_count: int
+    maps_used: int
+    maps_remaining: int
+
+
+def parse_player_row(row: list[str]) -> Optional[PlayerDatabaseRow]:
+    """Parse a player database row. Returns None if row is invalid."""
+    if len(row) < 6:
+        return None
+    try:
+        return {
+            "name": row[0],
+            "discord_id": int(row[4]),
+        }
+    except (ValueError, IndexError):
+        return None
+
+
+def parse_pool_change_row(row: list[str]) -> Optional[PoolChangeRow]:
+    """Parse a pool change row. Returns None if row is invalid."""
+    if len(row) < 5:
+        return None
+    return {
+        "name": str(row[0]),
+        "operation": str(row[1]),
+        "value": str(row[2]),
+        "pool_id": str(row[4]) if len(row) > 4 and row[4] else "",
+    }
+
+
+def parse_pool_row(row: list[str]) -> Optional[PoolRow]:
+    """Parse a pool row. Returns None if row is invalid."""
+    if len(row) < 1:
+        return None
+    pool_row: PoolRow = {"name": str(row[0])}
+    if len(row) > 4:
+        pool_row["pool_id"] = str(row[4])
+    if len(row) > 15:
+        try:
+            pool_row["maps_used"] = int(row[15])
+            pool_row["maps_remaining"] = int(row[16])
+        except (ValueError, IndexError):
+            pass
+    return pool_row
+
+
 def arena_to_json(arena_list: str) -> Sequence[SealedDeckEntry]:
     """Convert a list of cards in arena format to a list of json cards"""
     json_list: List[SealedDeckEntry] = []
@@ -233,13 +298,17 @@ class PoolTracker():
             pack_owner_user_id_match = ref and re.search("<@!?(?P<id>\\d+)>", ref.content)
             pack_owner_user_id = pack_owner_user_id_match and pack_owner_user_id_match.group("id")
 
-            # Get pool changes from spreadsheet
-            changes = await get_spreadsheet_values(self.sheet, self.spreadsheet_id, 'Pool Changes!B2:F')
+            # Get and parse pool changes from spreadsheet
+            raw_changes = await get_spreadsheet_values(self.sheet, self.spreadsheet_id, 'Pool Changes!B2:F')
+            changes = [c for c in (parse_pool_change_row(r) for r in raw_changes) if c is not None]
 
-            # find name from player db (name is column B, discord ID is column F)
-            player_data = await get_spreadsheet_values(self.sheet, self.spreadsheet_id, "Player Database!B2:F")
-            match = next(((i, r) for i, r in enumerate(player_data) if len(r) > 1 and len(r[1]) > 4 and r[1][4] == str(pack_owner_user_id)), (None, None))
-            player_row_index, player_row = match
+            # Find player in database (name is column B, discord ID is column F)
+            raw_player_data = await get_spreadsheet_values(self.sheet, self.spreadsheet_id, "Player Database!B2:F")
+            player_data = [p for p in (parse_player_row(r) for r in raw_player_data) if p is not None]
+            if pack_owner_user_id is None:
+                raise ValueError("Could not extract user ID from message reference")
+            player_match = next(((i, p) for i, p in enumerate(player_data) if p["discord_id"] == int(pack_owner_user_id)), (None, None))
+            player_row_index, player_row = player_match
 
             if player_row is None or player_row_index is None:
                 # This should only happen during debugging / spreadsheet setup
@@ -248,13 +317,13 @@ class PoolTracker():
             
             # pool row starts at 7 (1-indexed), player rows start at 0, so add 7 to the index
             row_num = player_row_index + 7
-            name = player_row[0]
+            name = player_row["name"]
 
-            # current pool is last pool in the changes that matches the player name; name column is B and pool id is  so index is 4
+            # current pool is last pool in the changes that matches the player name
             current_pool_id = ''
             for change in changes:
-                if len(change) >= 5 and change[0] == name and change[4]:
-                    current_pool_id = str(change[4])
+                if change["name"] == name and change["pool_id"]:
+                    current_pool_id = change["pool_id"]
 
             if current_pool_id == '':
                 print(f"rut row. No pool found for {name}")
@@ -566,28 +635,31 @@ class PoolBot(discord.Client):
             "XLN",
         ]
         set_to_generate = random.choice(possible_sets)
-        # Get sealeddeck link and loss count from spreadsheet
-        spreadsheet_values = await self.get_spreadsheet_values('Pools!B7:R200')
+        # Get and parse pool data from spreadsheet
+        raw_pools = await self.get_spreadsheet_values('Pools!B7:R200')
+        pools = [p for p in (parse_pool_row(r) for r in raw_pools) if p is not None]
         curr_row = 6
-        for row in spreadsheet_values:
+        for pool in pools:
             curr_row += 1
-            if len(row) < 5:
+            pool_name = pool.get("name")
+            if not pool_name or pool_name.lower() not in message.author.display_name.lower():
                 continue
-            if row[0].lower() != '' and row[0].lower() in message.author.display_name.lower():
-                if int(row[16]) <= 0:
-                    await message.reply(f'By my records, you do not have any unused maps. If this is in error, '
-                                        f'please post in {self.league_committee_channel.mention}')
-                    return
-
-                # Mark the map as used
-                self.sheet.values().update(spreadsheetId=self.spreadsheet_id,
-                                           range=f'Pools!Q{curr_row}:Q{curr_row}', valueInputOption='USER_ENTERED',
-                                           body={'values': [[int(row[15]) + 1]]}).execute()
-
-                # Roll a new pack
-                await self.packs_channel.send(
-                    f'!{set_to_generate} {message.author.mention} follows a map to uncharted territory')
+            maps_remaining = pool.get("maps_remaining", 0)
+            if maps_remaining <= 0:
+                await message.reply(f'By my records, you do not have any unused maps. If this is in error, '
+                                    f'please post in {self.league_committee_channel.mention}')
                 return
+
+            # Mark the map as used
+            maps_used = pool.get("maps_used", 0)
+            self.sheet.values().update(spreadsheetId=self.spreadsheet_id,
+                                       range=f'Pools!Q{curr_row}:Q{curr_row}', valueInputOption='USER_ENTERED',
+                                       body={'values': [[maps_used + 1]]}).execute()
+
+            # Roll a new pack
+            await self.packs_channel.send(
+                f'!{set_to_generate} {message.author.mention} follows a map to uncharted territory')
+            return
         await message.reply(f'Hmm, I can\'t find you in the league spreadsheet. '
                             f'Please post in {self.league_committee_channel.mention}')
 
@@ -603,29 +675,29 @@ class PoolBot(discord.Client):
             return
         sealed_deck_link = f'https://sealeddeck.tech/{sealed_deck_id}'
 
-        spreadsheet_values = await self.get_spreadsheet_values('Pools!B7:F200')
-
+        # Get and parse pool data from spreadsheet
+        raw_pools = await self.get_spreadsheet_values('Pools!B7:F200')
+        pools = [p for p in (parse_pool_row(r) for r in raw_pools) if p is not None]
         curr_row = 6
-        for row in spreadsheet_values:
+        for pool in pools:
             curr_row += 1
-            if len(row) < 1:
+            pool_name = pool.get("name")
+            if not pool_name or pool_name.lower() not in message.mentions[0].display_name.lower():
                 continue
-            if row[0].lower() != '' and row[0].lower() in message.mentions[0].display_name.lower():
-                # Update the proper cell in the spreadsheet
-                body = {
-                    'values': [
-                        # [f'=HYPERLINK("{sealed_deck_link}", "Link")', f'=HYPERLINK("{sealed_deck_link}", "Link")'],
-                        [sealed_deck_link, sealed_deck_link],
-                    ],
-                }
-                self.sheet.values().update(spreadsheetId=self.spreadsheet_id,
-                                           range=f'Pools!E{curr_row}:F{curr_row}', valueInputOption='USER_ENTERED',
-                                           body=body).execute()
-                self.sheet.values().update(spreadsheetId=self.spreadsheet_id,
-                                           range=f'Pools!S{curr_row}:S{curr_row}', valueInputOption='USER_ENTERED',
-                                           body={'values': [[sealed_deck_link]]}).execute()
+            # Update the proper cell in the spreadsheet
+            body = {
+                'values': [
+                    [sealed_deck_link, sealed_deck_link],
+                ],
+            }
+            self.sheet.values().update(spreadsheetId=self.spreadsheet_id,
+                                       range=f'Pools!E{curr_row}:F{curr_row}', valueInputOption='USER_ENTERED',
+                                       body=body).execute()
+            self.sheet.values().update(spreadsheetId=self.spreadsheet_id,
+                                       range=f'Pools!S{curr_row}:S{curr_row}', valueInputOption='USER_ENTERED',
+                                       body={'values': [[sealed_deck_link]]}).execute()
 
-                return
+            return
         # TODO do something if the value could not be found
         return
 
