@@ -425,19 +425,26 @@ class Matchmaker():
             challenger_extra = ""
             overall_extra = self.extra() if self.extra else ""
 
-            await self.channel.send(
-                f"{self.pending_user_mention}{pending_user_extra}, your anonymous LFM has been accepted by {message.author.mention}{challenger_extra}.{overall_extra}")
+            try:
+                await self.channel.send(
+                    f"{self.pending_user_mention}{pending_user_extra}, your anonymous LFM has been accepted by {message.author.mention}{challenger_extra}.{overall_extra}")
 
-            await update_message(
-                self.active_message,
-                f'~~{self.active_message.content}~~\n'
-                f'A match was found between {self.pending_user_mention}{pending_user_extra} and {message.author.mention}{challenger_extra}.'
-            )
+                result = await update_message(
+                    self.active_message,
+                    f'~~{self.active_message.content}~~\n'
+                    f'A match was found between {self.pending_user_mention}{pending_user_extra} and {message.author.mention}{challenger_extra}.'
+                )
 
-        # Clear matchmaker state even if message edit failed
-        self.pending_user_mention = None
-        self.pending_user_id = None
-        self.active_message = None
+                # Only clear state if everything succeeded
+                if result is not None:
+                    self.pending_user_mention = None
+                    self.pending_user_id = None
+                    self.active_message = None
+                else:
+                    print(f"Failed to update match message {self.active_message.id}, keeping player pending")
+            except Exception as e:
+                print(f"Failed to send match announcement: {e}, keeping player pending")
+                # State remains intact, player stays pending
 
     async def handle_command(self, message: discord.Message, argument: str):
         if self.pending_user_mention:
