@@ -410,7 +410,7 @@ COLLEGE_EMOJIS = {
 }
 
 class Matchmaker():
-    def __init__(self, sheet: Any, command: str, what_it_is: str, channel: discord.TextChannel, spreadsheet_id: str, extra=None, prefix=None):
+    def __init__(self, sheet: Any, command: str, what_it_is: str, channel: discord.TextChannel, spreadsheet_id: str, extra=None):
         self.sheet = sheet
         self.command = command
         self.what_it_is = what_it_is
@@ -420,7 +420,6 @@ class Matchmaker():
         self.pending_user_mention: Optional[str] = None
         self.pending_user_id: Optional[int] = None
         self.active_message: Optional[discord.Message] = None
-        self.prefix = prefix or ""
 
     async def issue_challenge(self, message: discord.Message):
         """Handle challenge command. Early returns if no pending user or active message."""
@@ -478,12 +477,12 @@ class Matchmaker():
             return
         if not argument:
             self.active_message = await self.channel.send(
-                f"{self.prefix}An anonymous player is looking for {self.what_it_is}. Post `!challenge` to reveal their identity and "
+                f"An anonymous player is looking for {self.what_it_is}. Post `!challenge` to reveal their identity and "
                 f"initiate {self.what_it_is}. "
             )
         else:
             self.active_message = await self.channel.send(
-                f"{self.prefix}An anonymous player is looking for {self.what_it_is}. Post `!challenge` to reveal their identity and "
+                f"An anonymous player is looking for {self.what_it_is}. Post `!challenge` to reveal their identity and "
                 f"initiate {self.what_it_is}.\n "
                 f"Message from the player:\n"
                 f"> {argument}"
@@ -547,7 +546,6 @@ class PoolBot(discord.Client):
         self.bot_bunker_channel = self._get_channel(self.config.bot_bunker_channel_id)
         self.league_committee_channel = self._get_channel(self.config.league_committee_channel_id)
         self.side_quest_pools_channel = self._get_channel(self.config.side_quest_pools_channel_id)
-        self.foot_clan_channel = self._get_channel(self.config.foot_clan_channel_id)
         self.num_boosters_awaiting = 0
         self.awaiting_boosters_for_user: Optional[Union[discord.Member, discord.User]] = None
         self.spreadsheet_id = self.config.spreadsheet_id
@@ -560,8 +558,7 @@ class PoolBot(discord.Client):
         self.second_pool_tracker: Optional[PoolTracker] = PoolTracker(self.sheet, self.pool_channel, self.second_packs_channel, self.config.second_spreadsheet_id, self.pools_tab_id) if self.config.second_spreadsheet_id else None
 
         self.matchmaker = Matchmaker(self.sheet, "!lfm", "a match", self.lfm_channel, self.spreadsheet_id)
-        self.foot_clan_matchmaker = Matchmaker(self.sheet, "!foot", "a Foot Clan match", self.foot_clan_channel, self.spreadsheet_id, None, "<@&1485338766166986852> ")
-        self.matchmakers = [self.matchmaker, self.foot_clan_matchmaker]
+        self.matchmakers = [self.matchmaker]
         for user in self.users:
             if user.name == 'Booster Tutor':
                 self.booster_tutor = user
@@ -930,7 +927,6 @@ class PoolBot(discord.Client):
         await message.author.send(
             f"I'm sorry, but I didn't understand that. Please send one of the following commands:\n"
             f"> `{self.matchmaker.command}`: creates an anonymous post looking for {self.matchmaker.what_it_is}.\n"
-            f"> `{self.foot_clan_matchmaker.command}`: creates an anonymous post looking for {self.foot_clan_matchmaker.what_it_is}.\n"
             f"> `!nvm`: removes an anonymous LFM that you've sent out.\n"
             f"> `!choosePackA`: responds to a pending pack selection option.\n"
             f"> `!choosePackB`: responds to a pending pack selection option."

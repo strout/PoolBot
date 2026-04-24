@@ -20,7 +20,6 @@ class Config:
 	bot_bunker_channel_id: int
 	league_committee_channel_id: int
 	side_quest_pools_channel_id: int
-	foot_clan_channel_id: int
 
 	second_spreadsheet_id: Optional[str] = None
 	skip_username: Optional[bool] = None
