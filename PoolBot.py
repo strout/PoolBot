@@ -531,7 +531,7 @@ class PoolBot(discord.Client):
     async def on_ready(self):
         print(f'{self.user} has connected to Discord!')
         if not self.config.skip_username and self.user is not None:
-            result = await self.user.edit(username='AGL Bot')
+            result = await self.user.edit(username=self.config.bot_name)
             if result is None:
                 raise RuntimeError("Failed to update bot username")
         # If this is true, posts will be limited to #bot-lab and #bot-bunker, and LFM DMs will be ignored.
@@ -810,7 +810,7 @@ class PoolBot(discord.Client):
     async def prompt_user_pick(self, message: discord.Message):
         # # Ensure the user doesn't already have a pending pick to make
         # pendingPickMessage = await self.packs_channel.history().find(
-        # 	lambda m : m.author.name == 'AGL Bot'
+        # 	lambda m : m.author.name == self.config.bot_name
         # 	and m.mentions
         # 	and m.mentions[0] == message.mentions[0]
         # 	and f'Pack Option' in m.content
@@ -866,14 +866,14 @@ class PoolBot(discord.Client):
             not_chosen_split = '!choosePackA`'
         chosen_message: Optional[discord.Message] = None
         async for message in self.packs_channel.history(limit=500):
-            if (message.author.name == 'AGL Bot' and message.mentions and message.mentions[0] == user
+            if (message.author.name == self.config.bot_name and message.mentions and message.mentions[0] == user
                     and f'Pack Option {chosen_option}' in message.content):
                 chosen_message = message
                 break
 
         not_chosen_message: Optional[discord.Message] = None
         async for message in self.packs_channel.history(limit=500):
-            if (message.author.name == 'AGL Bot' and message.mentions and message.mentions[0] == user
+            if (message.author.name == self.config.bot_name and message.mentions and message.mentions[0] == user
                     and f'Pack Option {not_chosen_option}' in message.content):
                 not_chosen_message = message
                 break

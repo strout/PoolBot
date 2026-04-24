@@ -21,6 +21,8 @@ class Config:
 	league_committee_channel_id: int
 	side_quest_pools_channel_id: int
 
+	bot_name: str
+
 	second_spreadsheet_id: Optional[str] = None
 	skip_username: Optional[bool] = None
 
