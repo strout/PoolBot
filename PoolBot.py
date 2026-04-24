@@ -59,6 +59,7 @@ class SealedDeckEntry(TypedDict):
 class PlayerDatabaseRow(TypedDict):
     name: str
     discord_id: int
+    college: str
 
 
 class PoolChangeRow(TypedDict):
@@ -80,12 +81,14 @@ class PoolRow(TypedDict, total=False):
 
 def parse_player_row(row: list[str]) -> Optional[PlayerDatabaseRow]:
     """Parse a player database row. Returns None if row is invalid."""
-    if len(row) < 6:
+    # Column AE (index 30) contains the college: A=0, ..., Z=25, AA=26, ..., AE=30
+    if len(row) < 31:
         return None
     try:
         return {
             "name": row[0],
             "discord_id": int(row[4]),
+            "college": row[30].strip(),
         }
     except (ValueError, IndexError):
         return None
@@ -397,14 +400,23 @@ class PoolTracker():
     async def set_cell_to_red(self, row: int, col: str):
         await set_cell_to_red(self.sheet, self.spreadsheet_id, self.tab_id, row, col)
 
+# College emote mappings (name between colons matches the College value in the sheet)
+COLLEGE_EMOJIS = {
+    "Prismari": "<:Prismari:826437623269556234>",
+    "Silverquill": "<:Silverquill:826437813121450005>",
+    "Quandrix": "<:Quandrix:826439903939264512>",
+    "Lorehold": "<:Lorehold:826437744489267223>",
+    "Witherbloom": "<:Witherbloom:826438882182692884>",
+}
+
 class Matchmaker():
-    def __init__(self, command: str, what_it_is: str, channel: discord.TextChannel, spreadsheet_id: str, extra=None, prefix=None):
+    def __init__(self, sheet: Any, command: str, what_it_is: str, channel: discord.TextChannel, spreadsheet_id: str, extra=None, prefix=None):
+        self.sheet = sheet
         self.command = command
         self.what_it_is = what_it_is
         self.channel = channel
         self.spreadsheet_id = spreadsheet_id
         self.extra = extra
-        self.sheet = None
         self.pending_user_mention: Optional[str] = None
         self.pending_user_id: Optional[int] = None
         self.active_message: Optional[discord.Message] = None
@@ -421,8 +433,21 @@ class Matchmaker():
         if self.active_message is None:
             return  # Shouldn't happen if pending_user_mention is set, but guard anyway
         async with self.channel.typing():
-            pending_user_extra = ""
-            challenger_extra = ""
+            # Fetch player data including College column (AE)
+            raw_player_data = await get_spreadsheet_values(self.sheet, self.spreadsheet_id, "Player Database!A2:AE")
+            player_data = [p for p in (parse_player_row(r) for r in raw_player_data) if p is not None]
+
+            def get_college_emote(discord_id: Optional[int]) -> str:
+                """Look up college emote for a player by their Discord ID."""
+                if discord_id is None:
+                    return ""
+                player = next((p for p in player_data if p["discord_id"] == discord_id), None)
+                if player:
+                    return COLLEGE_EMOJIS.get(player["college"], "")
+                return ""
+
+            pending_user_extra = get_college_emote(self.pending_user_id)
+            challenger_extra = get_college_emote(message.author.id)
             overall_extra = self.extra() if self.extra else ""
 
             try:
@@ -534,8 +559,8 @@ class PoolBot(discord.Client):
         self.pool_tracker = PoolTracker(self.sheet, self.pool_channel, self.packs_channel, self.spreadsheet_id, self.pools_tab_id)
         self.second_pool_tracker: Optional[PoolTracker] = PoolTracker(self.sheet, self.pool_channel, self.second_packs_channel, self.config.second_spreadsheet_id, self.pools_tab_id) if self.config.second_spreadsheet_id else None
 
-        self.matchmaker = Matchmaker("!lfm", "a match", self.lfm_channel, self.spreadsheet_id)
-        self.foot_clan_matchmaker = Matchmaker("!foot", "a Foot Clan match", self.foot_clan_channel, self.spreadsheet_id, None, "<@&1485338766166986852> ")
+        self.matchmaker = Matchmaker(self.sheet, "!lfm", "a match", self.lfm_channel, self.spreadsheet_id)
+        self.foot_clan_matchmaker = Matchmaker(self.sheet, "!foot", "a Foot Clan match", self.foot_clan_channel, self.spreadsheet_id, None, "<@&1485338766166986852> ")
         self.matchmakers = [self.matchmaker, self.foot_clan_matchmaker]
         for user in self.users:
             if user.name == 'Booster Tutor':
