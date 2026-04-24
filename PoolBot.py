@@ -183,12 +183,17 @@ async def pool_to_sealeddeck(
     return str(resp_json["poolId"])
 
 
-async def update_message(message: discord.Message, new_content: str) -> discord.Message:
-    """Updates the text contents of a sent bot message. Raises on failure."""
-    result = await message.edit(content=new_content)
-    if result is None:
-        raise PoolBotError(f"Failed to update message {message.id}")
-    return result
+async def update_message(message: discord.Message, new_content: str) -> Optional[discord.Message]:
+    """Updates the text contents of a sent bot message. Returns None on failure."""
+    try:
+        result = await message.edit(content=new_content)
+        return result
+    except discord.errors.Forbidden:
+        print(f"Could not edit message {message.id} - permission denied")
+        return None
+    except Exception as e:
+        print(f"Could not edit message {message.id}: {e}")
+        return None
 
 
 async def message_member(member: Union[discord.Member, discord.User], message: str):
@@ -424,11 +429,12 @@ class Matchmaker():
                 f"{self.pending_user_mention}{pending_user_extra}, your anonymous LFM has been accepted by {message.author.mention}{challenger_extra}.{overall_extra}")
 
             await update_message(
-                self.active_message,  # type is already narrowed by the None check above
+                self.active_message,
                 f'~~{self.active_message.content}~~\n'
                 f'A match was found between {self.pending_user_mention}{pending_user_extra} and {message.author.mention}{challenger_extra}.'
             )
 
+        # Clear matchmaker state even if message edit failed
         self.pending_user_mention = None
         self.pending_user_id = None
         self.active_message = None
@@ -853,9 +859,13 @@ class PoolBot(discord.Client):
 
         chosen_message_text = f'Pack chosen by {user.mention}.{chosen_message.content.split(split)[1]}'
 
-        updated_chosen = await update_message(chosen_message, chosen_message_text)  # Raises on failure
+        updated_chosen = await update_message(chosen_message, chosen_message_text)
+        if updated_chosen is None:
+            await user.send("Sorry, I couldn't update the pack selection message. Please try again or contact the league committee.")
+            return
+
         not_chosen_text = f'Pack not chosen by {user.mention}.' f'~~{not_chosen_message.content.split(not_chosen_split)[1]}~~'
-        await update_message(not_chosen_message, not_chosen_text)  # Raises on failure
+        await update_message(not_chosen_message, not_chosen_text)  # Best effort, don't fail if this doesn't work
 
         await user.send("Understood. Your selection has been noted.")
 
