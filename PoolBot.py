@@ -230,6 +230,7 @@ async def get_sheet_client() -> Any:
         raise
 
 async def get_spreadsheet_values(sheet: Any, spreadsheet_id: str, range: str, valueRenderOption="FORMATTED_VALUE") -> list[list[str]]:
+    """Fetch spreadsheet values with retry logic for transient errors. Raises SpreadsheetError on permanent failure."""
     retries = 0
     while retries < 5:
         try:
@@ -238,12 +239,12 @@ async def get_spreadsheet_values(sheet: Any, spreadsheet_id: str, range: str, va
                                         range=range,
                                         valueRenderOption=valueRenderOption).execute()
             return result.get('values', []) or []
-        except ssl.SSLEOFError:
+        except (ssl.SSLEOFError, HttpError) as err:
             retries += 1
+            if retries >= 5:
+                raise SpreadsheetError(f"Failed to fetch {range} after 5 retries: {err}")
+            print(f"Spreadsheet error (attempt {retries}/5): {err}")
             await sleep(retries)
-        except HttpError as err:
-            print(err)
-            raise
     return []
 
 async def set_cell_to_red(sheet, spreadsheet_id: str, tab_id: str, row: int, col: str):
@@ -276,8 +277,12 @@ async def set_cell_to_red(sheet, spreadsheet_id: str, tab_id: str, row: int, col
             },
         }],
     }
-    sheet.batchUpdate(spreadsheetId=spreadsheet_id,
-                      body=color_body).execute()
+    try:
+        sheet.batchUpdate(spreadsheetId=spreadsheet_id,
+                          body=color_body).execute()
+    except HttpError as e:
+        print(f"spreadsheet error — setting cell to red: {e}")
+        raise SpreadsheetError(f"Failed to set cell to red: {e}")
 
 class PoolTracker():
     def __init__(self, sheet: Any, pool_channel: discord.TextChannel, packs_channel: discord.TextChannel, spreadsheet_id: str, tab_id: str):
@@ -299,11 +304,21 @@ class PoolTracker():
             pack_owner_user_id = pack_owner_user_id_match and pack_owner_user_id_match.group("id")
 
             # Get and parse pool changes from spreadsheet
-            raw_changes = await get_spreadsheet_values(self.sheet, self.spreadsheet_id, 'Pool Changes!B2:F')
+            try:
+                raw_changes = await get_spreadsheet_values(self.sheet, self.spreadsheet_id, 'Pool Changes!B2:F')
+            except SpreadsheetError as e:
+                print(f"spreadsheet error — fetching changes: {e}")
+                await self.set_cell_to_red(0, 'G')  # Can't determine row, use 0
+                return
             changes = [c for c in (parse_pool_change_row(r) for r in raw_changes) if c is not None]
 
             # Find player in database (name is column B, discord ID is column F)
-            raw_player_data = await get_spreadsheet_values(self.sheet, self.spreadsheet_id, "Player Database!B2:F")
+            try:
+                raw_player_data = await get_spreadsheet_values(self.sheet, self.spreadsheet_id, "Player Database!B2:F")
+            except SpreadsheetError as e:
+                print(f"spreadsheet error — fetching player data: {e}")
+                await self.set_cell_to_red(0, 'G')
+                return
             player_data = [p for p in (parse_player_row(r) for r in raw_player_data) if p is not None]
             if pack_owner_user_id is None:
                 raise ValueError("Could not extract user ID from message reference")
@@ -352,7 +367,12 @@ class PoolTracker():
                 await self.set_cell_to_red(row_num, 'G')
                 return
 
-            await self.write_pack(name, new_pack_id, updated_pool_id)
+            try:
+                await self.write_pack(name, new_pack_id, updated_pool_id)
+            except SpreadsheetError as e:
+                print(f"spreadsheet error — writing pack: {e}")
+                await self.set_cell_to_red(row_num, 'G')
+                return
 
     async def write_pack(self, name: str, new_pack_id: str, updated_pool_id: str):
         pack_body = {
@@ -361,9 +381,13 @@ class PoolTracker():
             ],
         }
         # Find the proper column ID
-        self.sheet.values().append(spreadsheetId=self.spreadsheet_id,
-                                   range=f'Pool Changes!A:D', valueInputOption='USER_ENTERED',
-                                   body=pack_body).execute()
+        try:
+            self.sheet.values().append(spreadsheetId=self.spreadsheet_id,
+                                       range=f'Pool Changes!A:D', valueInputOption='USER_ENTERED',
+                                       body=pack_body).execute()
+        except HttpError as e:
+            print(f"spreadsheet error — writing pack: {e}")
+            raise SpreadsheetError(f"Failed to write pack to spreadsheet: {e}")
 
     async def set_cell_to_red(self, row: int, col: str):
         await set_cell_to_red(self.sheet, self.spreadsheet_id, self.tab_id, row, col)
@@ -687,7 +711,11 @@ class PoolBot(discord.Client):
         sealed_deck_link = f'https://sealeddeck.tech/{sealed_deck_id}'
 
         # Get and parse pool data from spreadsheet
-        raw_pools = await self.get_spreadsheet_values('Pools!B7:F200')
+        try:
+            raw_pools = await self.get_spreadsheet_values('Pools!B7:F200')
+        except SpreadsheetError as e:
+            print(f"spreadsheet error — fetching pools: {e}")
+            return
         pools = [p for p in (parse_pool_row(r) for r in raw_pools) if p is not None]
         curr_row = 6
         for pool in pools:
@@ -701,12 +729,16 @@ class PoolBot(discord.Client):
                     [sealed_deck_link, sealed_deck_link],
                 ],
             }
-            self.sheet.values().update(spreadsheetId=self.spreadsheet_id,
-                                       range=f'Pools!E{curr_row}:F{curr_row}', valueInputOption='USER_ENTERED',
-                                       body=body).execute()
-            self.sheet.values().update(spreadsheetId=self.spreadsheet_id,
-                                       range=f'Pools!S{curr_row}:S{curr_row}', valueInputOption='USER_ENTERED',
-                                       body={'values': [[sealed_deck_link]]}).execute()
+            try:
+                self.sheet.values().update(spreadsheetId=self.spreadsheet_id,
+                                           range=f'Pools!E{curr_row}:F{curr_row}', valueInputOption='USER_ENTERED',
+                                           body=body).execute()
+                self.sheet.values().update(spreadsheetId=self.spreadsheet_id,
+                                           range=f'Pools!S{curr_row}:S{curr_row}', valueInputOption='USER_ENTERED',
+                                           body={'values': [[sealed_deck_link]]}).execute()
+            except HttpError as e:
+                print(f"spreadsheet error — updating pool: {e}")
+                return
 
             return
         # TODO do something if the value could not be found
