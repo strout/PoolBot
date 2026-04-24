@@ -337,10 +337,21 @@ class PoolTracker():
             else:
                 field = next(filter(lambda f: f.name == "SealedDeck.Tech ID", message.embeds[0].fields))
                 field_value = field.value or ""
-                pack_json = await sealeddeck_pool(field_value.replace("`", ""))  # Raises SealedDeckError on failure
+                try:
+                    pack_json = await sealeddeck_pool(field_value.replace("`", ""))
+                except SealedDeckError as e:
+                    print(f"sealeddeck error — fetching pack: {e}")
+                    await self.set_cell_to_red(row_num, 'G')
+                    return
 
-            new_pack_id = await pool_to_sealeddeck(pack_json)
-            updated_pool_id = await pool_to_sealeddeck(pack_json, current_pool_id)
+            try:
+                new_pack_id = await pool_to_sealeddeck(pack_json)
+                updated_pool_id = await pool_to_sealeddeck(pack_json, current_pool_id)
+            except SealedDeckError as e:
+                print(f"sealeddeck error — updating pool: {e}")
+                await self.set_cell_to_red(row_num, 'G')
+                return
+
             await self.write_pack(name, new_pack_id, updated_pool_id)
 
     async def write_pack(self, name: str, new_pack_id: str, updated_pool_id: str):
