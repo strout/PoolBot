@@ -924,9 +924,12 @@ class PoolBot(discord.Client):
                 )
             return
 
+        matchmaker_help = "\n".join(
+            f"> `{mm.command}`: creates an anonymous post looking for {mm.what_it_is}." for mm in self.matchmakers
+        )
         await message.author.send(
             f"I'm sorry, but I didn't understand that. Please send one of the following commands:\n"
-            f"> `{self.matchmaker.command}`: creates an anonymous post looking for {self.matchmaker.what_it_is}.\n"
+            f"{matchmaker_help}\n"
             f"> `!nvm`: removes an anonymous LFM that you've sent out.\n"
             f"> `!choosePackA`: responds to a pending pack selection option.\n"
             f"> `!choosePackB`: responds to a pending pack selection option."
