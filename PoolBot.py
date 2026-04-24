@@ -497,12 +497,11 @@ class PoolBot(discord.Client):
         self.league_start = datetime.fromisoformat('2022-06-22')
         super().__init__(intents=intents, *args, **kwargs)
 
-    def _get_channel(self, channel_id: int, dev_mode: bool, dev_id: int) -> discord.TextChannel:
+    def _get_channel(self, channel_id: int) -> discord.TextChannel:
         """Get a channel by ID, validating it exists and is a TextChannel. Raises on failure."""
-        target_id = channel_id if not dev_mode else dev_id
-        channel = self.get_channel(target_id)
+        channel = self.get_channel(channel_id)
         if channel is None or not isinstance(channel, discord.TextChannel):
-            raise RuntimeError(f"Required channel {target_id} not found or is not a TextChannel")
+            raise RuntimeError(f"Required channel {channel_id} not found or is not a TextChannel")
         return channel
 
     async def on_ready(self):
@@ -516,14 +515,14 @@ class PoolBot(discord.Client):
         self.pools_tab_id = self.config.pools_tab_id
 
         # Get all required channels at startup - fail fast if any are missing
-        self.pool_channel = self._get_channel(719933932690472970, self.dev_mode, 1065100936445448232)
-        self.packs_channel = self._get_channel(798002275452846111, self.dev_mode, 1065101003168436295)
-        self.second_packs_channel = self._get_channel(935295982596423711, self.dev_mode, 1065101003168436295)
-        self.lfm_channel = self._get_channel(720338190300348559, self.dev_mode, 1065101040770363442)
-        self.bot_bunker_channel = self._get_channel(1000465465572864141, self.dev_mode, 1065101076002508800)
-        self.league_committee_channel = self._get_channel(1052324453188632696, self.dev_mode, 1065101182525259866)
-        self.side_quest_pools_channel = self._get_channel(1055515435073806387, self.dev_mode, 1055515435073806387)
-        self.foot_clan_channel = self._get_channel(1206645629250445342, self.dev_mode, 1065101076002508800)
+        self.pool_channel = self._get_channel(self.config.pool_channel_id)
+        self.packs_channel = self._get_channel(self.config.packs_channel_id)
+        self.second_packs_channel = self._get_channel(self.config.second_packs_channel_id)
+        self.lfm_channel = self._get_channel(self.config.lfm_channel_id)
+        self.bot_bunker_channel = self._get_channel(self.config.bot_bunker_channel_id)
+        self.league_committee_channel = self._get_channel(self.config.league_committee_channel_id)
+        self.side_quest_pools_channel = self._get_channel(self.config.side_quest_pools_channel_id)
+        self.foot_clan_channel = self._get_channel(self.config.foot_clan_channel_id)
         self.num_boosters_awaiting = 0
         self.awaiting_boosters_for_user: Optional[Union[discord.Member, discord.User]] = None
         self.spreadsheet_id = self.config.spreadsheet_id

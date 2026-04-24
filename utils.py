@@ -11,6 +11,17 @@ class Config:
 	debug_mode: str
 	spreadsheet_id: str
 	pools_tab_id: str
+
+	# Channel IDs
+	pool_channel_id: int
+	packs_channel_id: int
+	second_packs_channel_id: int
+	lfm_channel_id: int
+	bot_bunker_channel_id: int
+	league_committee_channel_id: int
+	side_quest_pools_channel_id: int
+	foot_clan_channel_id: int
+
 	second_spreadsheet_id: Optional[str] = None
 	skip_username: Optional[bool] = None
 
