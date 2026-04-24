@@ -87,7 +87,7 @@ def parse_player_row(row: list[str]) -> Optional[PlayerDatabaseRow]:
     try:
         return {
             "name": row[0],
-            "discord_id": int(row[4]),
+            "discord_id": int(row[3]),
             "college": row[30].strip(),
         }
     except (ValueError, IndexError):
