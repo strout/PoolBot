@@ -59,7 +59,6 @@ class SealedDeckEntry(TypedDict):
 class PlayerDatabaseRow(TypedDict):
     name: str
     discord_id: int
-    college: str
 
 
 class PoolChangeRow(TypedDict):
@@ -81,14 +80,12 @@ class PoolRow(TypedDict, total=False):
 
 def parse_player_row(row: list[str]) -> Optional[PlayerDatabaseRow]:
     """Parse a player database row. Returns None if row is invalid."""
-    # Column AE (index 30) contains the college: A=0, ..., Z=25, AA=26, ..., AE=30
     if len(row) < 31:
         return None
     try:
         return {
             "name": row[0],
             "discord_id": int(row[3]),
-            "college": row[30].strip(),
         }
     except (ValueError, IndexError):
         return None
@@ -400,15 +397,6 @@ class PoolTracker():
     async def set_cell_to_red(self, row: int, col: str):
         await set_cell_to_red(self.sheet, self.spreadsheet_id, self.tab_id, row, col)
 
-# College emote mappings (name between colons matches the College value in the sheet)
-COLLEGE_EMOJIS = {
-    "Prismari": "<:Prismari:826437623269556234>",
-    "Silverquill": "<:Silverquill:826437813121450005>",
-    "Quandrix": "<:Quandrix:826439903939264512>",
-    "Lorehold": "<:Lorehold:826437744489267223>",
-    "Witherbloom": "<:Witherbloom:826438882182692884>",
-}
-
 class Matchmaker():
     def __init__(self, sheet: Any, command: str, what_it_is: str, channel: discord.TextChannel, spreadsheet_id: str, extra=None):
         self.sheet = sheet
@@ -432,21 +420,11 @@ class Matchmaker():
         if self.active_message is None:
             return  # Shouldn't happen if pending_user_mention is set, but guard anyway
         async with self.channel.typing():
-            # Fetch player data including College column (AE)
             raw_player_data = await get_spreadsheet_values(self.sheet, self.spreadsheet_id, "Player Database!A2:AE")
             player_data = [p for p in (parse_player_row(r) for r in raw_player_data) if p is not None]
 
-            def get_college_emote(discord_id: Optional[int]) -> str:
-                """Look up college emote for a player by their Discord ID."""
-                if discord_id is None:
-                    return ""
-                player = next((p for p in player_data if p["discord_id"] == discord_id), None)
-                if player:
-                    return COLLEGE_EMOJIS.get(player["college"], "")
-                return ""
-
-            pending_user_extra = get_college_emote(self.pending_user_id)
-            challenger_extra = get_college_emote(message.author.id)
+            pending_user_extra = ""
+            challenger_extra = ""
             overall_extra = self.extra() if self.extra else ""
 
             try:
