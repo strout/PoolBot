@@ -105,24 +105,24 @@ def parse_player_row(row: list[str]) -> Optional[PlayerDatabaseRow]:
         return None
 
 
-def format_coin_flip_note(
+def format_match_announcement(
     pending_mention: str,
     pending_score: float,
     challenger_mention: str,
     challenger_score: float,
 ) -> str:
-    """Describe hero scores and who wins the coin flip (higher score wins)."""
-    note = (
-        f"\n{pending_mention} has Hero Score {pending_score:g}\n"
-        f"{challenger_mention} has Hero Score {challenger_score:g}"
+    """Build the match acceptance message with hero scores and coin flip result."""
+    announcement = (
+        f"{pending_mention} (Hero Score: {pending_score:g}), your anonymous LFM has been accepted by "
+        f"{challenger_mention} (Hero Score: {challenger_score:g})."
     )
     if pending_score > challenger_score:
-        note += f"\n{pending_mention} wins the coin flip and chooses whether to play first."
+        announcement += f"\n{pending_mention} wins the coin flip and chooses whether to play first."
     elif challenger_score > pending_score:
-        note += f"\n{challenger_mention} wins the coin flip and chooses whether to play first."
+        announcement += f"\n{challenger_mention} wins the coin flip and chooses whether to play first."
     else:
-        note += "\nHero Scores are tied — flip a coin to decide who plays first."
-    return note
+        announcement += "\nHero Scores are tied - flip a coin to decide who plays first."
+    return announcement
 
 
 def parse_pool_change_row(row: list[str]) -> Optional[PoolChangeRow]:
@@ -512,7 +512,7 @@ class Matchmaker():
             challenger_player = get_player(message.author.id)
             pending_score = pending_player["hero_score"] if pending_player else 0.0
             challenger_score = challenger_player["hero_score"] if challenger_player else 0.0
-            coin_flip_note = format_coin_flip_note(
+            match_announcement = format_match_announcement(
                 self.pending_user_mention or "LFM player",
                 pending_score,
                 message.author.mention,
@@ -521,10 +521,7 @@ class Matchmaker():
             overall_extra = self.extra() if self.extra else ""
 
             try:
-                await self.channel.send(
-                    f"{self.pending_user_mention}, your anonymous LFM has been accepted by "
-                    f"{message.author.mention}.{coin_flip_note}{overall_extra}"
-                )
+                await self.channel.send(f"{match_announcement}{overall_extra}")
             except Exception as e:
                 print(f"Failed to send match announcement: {e}, keeping player pending")
                 # State remains intact, player stays pending
@@ -534,8 +531,7 @@ class Matchmaker():
             await update_message(
                 self.active_message,
                 f'~~{self.active_message.content}~~\n'
-                f'A match was found between {self.pending_user_mention} and '
-                f'{message.author.mention}.{coin_flip_note}'
+                f'A match was found!'
             )
 
             # Clear state - match is done regardless of whether update_message succeeded
