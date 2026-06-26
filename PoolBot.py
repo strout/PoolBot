@@ -517,6 +517,8 @@ class Matchmaker():
             coin_flip_note = format_coin_flip_note(
                 pending_name, pending_score, challenger_name, challenger_score
             )
+            pending_user_extra = ""
+            challenger_extra = ""
             overall_extra = self.extra() if self.extra else ""
 
             try:
