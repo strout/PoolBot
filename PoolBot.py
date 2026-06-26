@@ -59,7 +59,7 @@ class SealedDeckEntry(TypedDict):
 class PlayerDatabaseRow(TypedDict):
     name: str
     discord_id: int
-    college: str
+    hero_score: float
 
 
 class PoolChangeRow(TypedDict):
@@ -79,19 +79,50 @@ class PoolRow(TypedDict, total=False):
     maps_remaining: int
 
 
+def parse_hero_score(value: str) -> float:
+    """Parse Hero Score from column AE. Empty or invalid values become 0."""
+    stripped = value.strip()
+    if not stripped:
+        return 0.0
+    try:
+        return float(stripped)
+    except ValueError:
+        return 0.0
+
+
 def parse_player_row(row: list[str]) -> Optional[PlayerDatabaseRow]:
     """Parse a player database row. Returns None if row is invalid."""
-    # Column AE (index 30) contains the college: A=0, ..., Z=25, AA=26, ..., AE=30
+    # Column AE (index 30) contains Hero Score: A=0, ..., Z=25, AA=26, ..., AE=30
     if len(row) < 31:
         return None
     try:
         return {
             "name": row[0],
             "discord_id": int(row[3]),
-            "college": row[30].strip(),
+            "hero_score": parse_hero_score(row[30]),
         }
     except (ValueError, IndexError):
         return None
+
+
+def format_coin_flip_note(
+    pending_name: str,
+    pending_score: float,
+    challenger_name: str,
+    challenger_score: float,
+) -> str:
+    """Describe hero scores and who wins the coin flip (higher score wins)."""
+    note = (
+        f" {pending_name} has Hero Score {pending_score:g}, "
+        f"{challenger_name} has Hero Score {challenger_score:g}."
+    )
+    if pending_score > challenger_score:
+        note += f" {pending_name} wins the coin flip and chooses whether to play first."
+    elif challenger_score > pending_score:
+        note += f" {challenger_name} wins the coin flip and chooses whether to play first."
+    else:
+        note += " Hero Scores are tied — flip a coin to decide who plays first."
+    return note
 
 
 def parse_pool_change_row(row: list[str]) -> Optional[PoolChangeRow]:
@@ -255,6 +286,22 @@ async def get_spreadsheet_values(sheet: Any, spreadsheet_id: str, range: str, va
             await sleep(retries)
     return []
 
+async def get_sheet_title_by_id(spreadsheet: Any, spreadsheet_id: str, tab_id: str) -> str:
+    """Resolve a numeric sheet tab ID to its title for A1 range notation."""
+    tab_id_int = int(tab_id)
+    try:
+        result = spreadsheet.get(
+            spreadsheetId=spreadsheet_id,
+            fields='sheets(properties(sheetId,title))',
+        ).execute()
+    except HttpError as err:
+        raise SpreadsheetError(f"Failed to fetch spreadsheet metadata: {err}")
+    for sheet in result.get('sheets', []):
+        props = sheet.get('properties', {})
+        if props.get('sheetId') == tab_id_int:
+            return props['title']
+    raise SpreadsheetError(f"Sheet tab id {tab_id} not found in spreadsheet")
+
 async def set_cell_to_red(sheet, spreadsheet_id: str, tab_id: str, row: int, col: str):
     # Note that this request (annoyingly) uses indices instead of the regular cell format.
     color_body = {
@@ -400,26 +447,40 @@ class PoolTracker():
     async def set_cell_to_red(self, row: int, col: str):
         await set_cell_to_red(self.sheet, self.spreadsheet_id, self.tab_id, row, col)
 
-# College emote mappings (name between colons matches the College value in the sheet)
-COLLEGE_EMOJIS = {
-    "Prismari": "<:Prismari:826437623269556234>",
-    "Silverquill": "<:Silverquill:826437813121450005>",
-    "Quandrix": "<:Quandrix:826439903939264512>",
-    "Lorehold": "<:Lorehold:826437744489267223>",
-    "Witherbloom": "<:Witherbloom:826438882182692884>",
-}
-
 class Matchmaker():
-    def __init__(self, sheet: Any, command: str, what_it_is: str, channel: discord.TextChannel, spreadsheet_id: str, extra=None):
+    def __init__(
+        self,
+        sheet: Any,
+        command: str,
+        what_it_is: str,
+        channel: discord.TextChannel,
+        spreadsheet_id: str,
+        player_database_tab_id: str,
+        extra=None,
+    ):
         self.sheet = sheet
         self.command = command
         self.what_it_is = what_it_is
         self.channel = channel
         self.spreadsheet_id = spreadsheet_id
+        self.player_database_tab_id = player_database_tab_id
         self.extra = extra
         self.pending_user_mention: Optional[str] = None
         self.pending_user_id: Optional[int] = None
         self.active_message: Optional[discord.Message] = None
+        self._player_database_tab_name: Optional[str] = None
+
+    async def _fetch_player_data(self) -> list[PlayerDatabaseRow]:
+        if self._player_database_tab_name is None:
+            self._player_database_tab_name = await get_sheet_title_by_id(
+                self.sheet, self.spreadsheet_id, self.player_database_tab_id
+            )
+        tab_name = self._player_database_tab_name.replace("'", "''")
+        player_range = f"'{tab_name}'!A2:AE"
+        raw_player_data = await get_spreadsheet_values(
+            self.sheet, self.spreadsheet_id, player_range
+        )
+        return [p for p in (parse_player_row(r) for r in raw_player_data) if p is not None]
 
     async def issue_challenge(self, message: discord.Message):
         """Handle challenge command. Early returns if no pending user or active message."""
@@ -432,26 +493,37 @@ class Matchmaker():
         if self.active_message is None:
             return  # Shouldn't happen if pending_user_mention is set, but guard anyway
         async with self.channel.typing():
-            # Fetch player data including College column (AE)
-            raw_player_data = await get_spreadsheet_values(self.sheet, self.spreadsheet_id, "Player Database!A2:AE")
-            player_data = [p for p in (parse_player_row(r) for r in raw_player_data) if p is not None]
+            try:
+                player_data = await self._fetch_player_data()
+            except SpreadsheetError as e:
+                print(f"spreadsheet error — fetching player data for matchmaking: {e}")
+                await self.channel.send(
+                    f"Sorry, I couldn't look up player data to resolve the coin flip. "
+                    f"Please try again or contact the league committee."
+                )
+                return
 
-            def get_college_emote(discord_id: Optional[int]) -> str:
-                """Look up college emote for a player by their Discord ID."""
+            def get_player(discord_id: Optional[int]) -> Optional[PlayerDatabaseRow]:
                 if discord_id is None:
-                    return ""
-                player = next((p for p in player_data if p["discord_id"] == discord_id), None)
-                if player:
-                    return COLLEGE_EMOJIS.get(player["college"], "")
-                return ""
+                    return None
+                return next((p for p in player_data if p["discord_id"] == discord_id), None)
 
-            pending_user_extra = get_college_emote(self.pending_user_id)
-            challenger_extra = get_college_emote(message.author.id)
+            pending_player = get_player(self.pending_user_id)
+            challenger_player = get_player(message.author.id)
+            pending_name = pending_player["name"] if pending_player else self.pending_user_mention or "LFM player"
+            challenger_name = challenger_player["name"] if challenger_player else message.author.display_name
+            pending_score = pending_player["hero_score"] if pending_player else 0.0
+            challenger_score = challenger_player["hero_score"] if challenger_player else 0.0
+            coin_flip_note = format_coin_flip_note(
+                pending_name, pending_score, challenger_name, challenger_score
+            )
             overall_extra = self.extra() if self.extra else ""
 
             try:
                 await self.channel.send(
-                    f"{self.pending_user_mention}{pending_user_extra}, your anonymous LFM has been accepted by {message.author.mention}{challenger_extra}.{overall_extra}")
+                    f"{self.pending_user_mention}, your anonymous LFM has been accepted by "
+                    f"{message.author.mention}.{coin_flip_note}{overall_extra}"
+                )
             except Exception as e:
                 print(f"Failed to send match announcement: {e}, keeping player pending")
                 # State remains intact, player stays pending
@@ -461,7 +533,8 @@ class Matchmaker():
             await update_message(
                 self.active_message,
                 f'~~{self.active_message.content}~~\n'
-                f'A match was found between {self.pending_user_mention}{pending_user_extra} and {message.author.mention}{challenger_extra}.'
+                f'A match was found between {self.pending_user_mention} and '
+                f'{message.author.mention}.{coin_flip_note}'
             )
 
             # Clear state - match is done regardless of whether update_message succeeded
@@ -557,7 +630,14 @@ class PoolBot(discord.Client):
         self.pool_tracker = PoolTracker(self.sheet, self.pool_channel, self.packs_channel, self.spreadsheet_id, self.pools_tab_id)
         self.second_pool_tracker: Optional[PoolTracker] = PoolTracker(self.sheet, self.pool_channel, self.second_packs_channel, self.config.second_spreadsheet_id, self.pools_tab_id) if self.config.second_spreadsheet_id else None
 
-        self.matchmaker = Matchmaker(self.sheet, "!lfm", "a match", self.lfm_channel, self.spreadsheet_id)
+        self.matchmaker = Matchmaker(
+            self.sheet,
+            "!lfm",
+            "a match",
+            self.lfm_channel,
+            self.spreadsheet_id,
+            self.config.player_database_tab_id,
+        )
         self.matchmakers = [self.matchmaker]
         for user in self.users:
             if user.name == 'Booster Tutor':

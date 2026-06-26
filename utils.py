@@ -11,6 +11,7 @@ class Config:
 	debug_mode: str
 	spreadsheet_id: str
 	pools_tab_id: str
+	player_database_tab_id: str
 
 	# Channel IDs
 	pool_channel_id: int
