@@ -106,22 +106,22 @@ def parse_player_row(row: list[str]) -> Optional[PlayerDatabaseRow]:
 
 
 def format_coin_flip_note(
-    pending_name: str,
+    pending_mention: str,
     pending_score: float,
-    challenger_name: str,
+    challenger_mention: str,
     challenger_score: float,
 ) -> str:
     """Describe hero scores and who wins the coin flip (higher score wins)."""
     note = (
-        f" {pending_name} has Hero Score {pending_score:g}, "
-        f"{challenger_name} has Hero Score {challenger_score:g}."
+        f"\n{pending_mention} has Hero Score {pending_score:g}\n"
+        f"{challenger_mention} has Hero Score {challenger_score:g}"
     )
     if pending_score > challenger_score:
-        note += f" {pending_name} wins the coin flip and chooses whether to play first."
+        note += f"\n{pending_mention} wins the coin flip and chooses whether to play first."
     elif challenger_score > pending_score:
-        note += f" {challenger_name} wins the coin flip and chooses whether to play first."
+        note += f"\n{challenger_mention} wins the coin flip and chooses whether to play first."
     else:
-        note += " Hero Scores are tied — flip a coin to decide who plays first."
+        note += "\nHero Scores are tied — flip a coin to decide who plays first."
     return note
 
 
@@ -510,12 +510,13 @@ class Matchmaker():
 
             pending_player = get_player(self.pending_user_id)
             challenger_player = get_player(message.author.id)
-            pending_name = pending_player["name"] if pending_player else self.pending_user_mention or "LFM player"
-            challenger_name = challenger_player["name"] if challenger_player else message.author.display_name
             pending_score = pending_player["hero_score"] if pending_player else 0.0
             challenger_score = challenger_player["hero_score"] if challenger_player else 0.0
             coin_flip_note = format_coin_flip_note(
-                pending_name, pending_score, challenger_name, challenger_score
+                self.pending_user_mention or "LFM player",
+                pending_score,
+                message.author.mention,
+                challenger_score,
             )
             overall_extra = self.extra() if self.extra else ""
 
