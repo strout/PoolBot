@@ -492,7 +492,8 @@ class Matchmaker():
             return
         if self.active_message is None:
             return  # Shouldn't happen if pending_user_mention is set, but guard anyway
-        async with self.channel.typing():
+        # async with self.channel.typing():
+        if True:
             try:
                 player_data = await self._fetch_player_data()
             except SpreadsheetError as e:
