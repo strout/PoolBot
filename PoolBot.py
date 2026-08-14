@@ -59,7 +59,6 @@ class SealedDeckEntry(TypedDict):
 class PlayerDatabaseRow(TypedDict):
     name: str
     discord_id: int
-    hero_score: float
 
 
 class PoolChangeRow(TypedDict):
@@ -79,50 +78,17 @@ class PoolRow(TypedDict, total=False):
     maps_remaining: int
 
 
-def parse_hero_score(value: str) -> float:
-    """Parse Hero Score from column AE. Empty or invalid values become 0."""
-    stripped = value.strip()
-    if not stripped:
-        return 0.0
-    try:
-        return float(stripped)
-    except ValueError:
-        return 0.0
-
-
 def parse_player_row(row: list[str]) -> Optional[PlayerDatabaseRow]:
     """Parse a player database row. Returns None if row is invalid."""
-    # Column AE (index 30) contains Hero Score: A=0, ..., Z=25, AA=26, ..., AE=30
-    if len(row) < 31:
+    if len(row) < 4:
         return None
     try:
         return {
             "name": row[0],
             "discord_id": int(row[3]),
-            "hero_score": parse_hero_score(row[30]),
         }
     except (ValueError, IndexError):
         return None
-
-
-def format_match_announcement(
-    pending_mention: str,
-    pending_score: float,
-    challenger_mention: str,
-    challenger_score: float,
-) -> str:
-    """Build the match acceptance message with hero scores and coin flip result."""
-    announcement = (
-        f"{pending_mention} (Hero Score: {pending_score:g}), your anonymous LFM has been accepted by "
-        f"{challenger_mention} (Hero Score: {challenger_score:g})."
-    )
-    if pending_score > challenger_score:
-        announcement += f"\n{pending_mention} wins the coin flip and chooses whether to play first."
-    elif challenger_score > pending_score:
-        announcement += f"\n{challenger_mention} wins the coin flip and chooses whether to play first."
-    else:
-        announcement += "\nHero Scores are tied - flip a coin to decide who plays first."
-    return announcement
 
 
 def parse_pool_change_row(row: list[str]) -> Optional[PoolChangeRow]:
@@ -286,22 +252,6 @@ async def get_spreadsheet_values(sheet: Any, spreadsheet_id: str, range: str, va
             await sleep(retries)
     return []
 
-async def get_sheet_title_by_id(spreadsheet: Any, spreadsheet_id: str, tab_id: str) -> str:
-    """Resolve a numeric sheet tab ID to its title for A1 range notation."""
-    tab_id_int = int(tab_id)
-    try:
-        result = spreadsheet.get(
-            spreadsheetId=spreadsheet_id,
-            fields='sheets(properties(sheetId,title))',
-        ).execute()
-    except HttpError as err:
-        raise SpreadsheetError(f"Failed to fetch spreadsheet metadata: {err}")
-    for sheet in result.get('sheets', []):
-        props = sheet.get('properties', {})
-        if props.get('sheetId') == tab_id_int:
-            return props['title']
-    raise SpreadsheetError(f"Sheet tab id {tab_id} not found in spreadsheet")
-
 async def set_cell_to_red(sheet, spreadsheet_id: str, tab_id: str, row: int, col: str):
     # Note that this request (annoyingly) uses indices instead of the regular cell format.
     color_body = {
@@ -450,37 +400,17 @@ class PoolTracker():
 class Matchmaker():
     def __init__(
         self,
-        sheet: Any,
         command: str,
         what_it_is: str,
         channel: discord.TextChannel,
-        spreadsheet_id: str,
-        player_database_tab_id: str,
         extra=None,
     ):
-        self.sheet = sheet
         self.command = command
         self.what_it_is = what_it_is
         self.channel = channel
-        self.spreadsheet_id = spreadsheet_id
-        self.player_database_tab_id = player_database_tab_id
         self.extra = extra
         self.pending_user_mention: Optional[str] = None
-        self.pending_user_id: Optional[int] = None
         self.active_message: Optional[discord.Message] = None
-        self._player_database_tab_name: Optional[str] = None
-
-    async def _fetch_player_data(self) -> list[PlayerDatabaseRow]:
-        if self._player_database_tab_name is None:
-            self._player_database_tab_name = await get_sheet_title_by_id(
-                self.sheet, self.spreadsheet_id, self.player_database_tab_id
-            )
-        tab_name = self._player_database_tab_name.replace("'", "''")
-        player_range = f"'{tab_name}'!A2:AE"
-        raw_player_data = await get_spreadsheet_values(
-            self.sheet, self.spreadsheet_id, player_range
-        )
-        return [p for p in (parse_player_row(r) for r in raw_player_data) if p is not None]
 
     async def issue_challenge(self, message: discord.Message):
         """Handle challenge command. Early returns if no pending user or active message."""
@@ -492,52 +422,27 @@ class Matchmaker():
             return
         if self.active_message is None:
             return  # Shouldn't happen if pending_user_mention is set, but guard anyway
-        async with self.channel.typing():
-            try:
-                player_data = await self._fetch_player_data()
-            except SpreadsheetError as e:
-                print(f"spreadsheet error — fetching player data for matchmaking: {e}")
-                await self.channel.send(
-                    f"Sorry, I couldn't look up player data to resolve the coin flip. "
-                    f"Please try again or contact the league committee."
-                )
-                return
 
-            def get_player(discord_id: Optional[int]) -> Optional[PlayerDatabaseRow]:
-                if discord_id is None:
-                    return None
-                return next((p for p in player_data if p["discord_id"] == discord_id), None)
-
-            pending_player = get_player(self.pending_user_id)
-            challenger_player = get_player(message.author.id)
-            pending_score = pending_player["hero_score"] if pending_player else 0.0
-            challenger_score = challenger_player["hero_score"] if challenger_player else 0.0
-            match_announcement = format_match_announcement(
-                self.pending_user_mention or "LFM player",
-                pending_score,
-                message.author.mention,
-                challenger_score,
+        overall_extra = self.extra() if self.extra else ""
+        try:
+            await self.channel.send(
+                f"{self.pending_user_mention}, your anonymous LFM has been accepted by {message.author.mention}.{overall_extra}"
             )
-            overall_extra = self.extra() if self.extra else ""
+        except Exception as e:
+            print(f"Failed to send match announcement: {e}, keeping player pending")
+            # State remains intact, player stays pending
+            return
 
-            try:
-                await self.channel.send(f"{match_announcement}{overall_extra}")
-            except Exception as e:
-                print(f"Failed to send match announcement: {e}, keeping player pending")
-                # State remains intact, player stays pending
-                return
+        # Announcement sent - match is complete. Update old post is cosmetic.
+        await update_message(
+            self.active_message,
+            f'~~{self.active_message.content}~~\n'
+            f'A match was found!'
+        )
 
-            # Announcement sent - match is complete. Update old post is cosmetic.
-            await update_message(
-                self.active_message,
-                f'~~{self.active_message.content}~~\n'
-                f'A match was found!'
-            )
-
-            # Clear state - match is done regardless of whether update_message succeeded
-            self.pending_user_mention = None
-            self.pending_user_id = None
-            self.active_message = None
+        # Clear state - match is done regardless of whether update_message succeeded
+        self.pending_user_mention = None
+        self.active_message = None
 
     async def handle_command(self, message: discord.Message, argument: str):
         if self.pending_user_mention:
@@ -564,7 +469,6 @@ class Matchmaker():
             f"If you want to cancel this, send me a message with the text `!nvm`."
         )
         self.pending_user_mention = message.author.mention
-        self.pending_user_id = int(message.author.id)
 
     async def handle_retract(self, message: discord.Message) -> bool:
         if message.author.mention == self.pending_user_mention and self.active_message is not None:
@@ -574,7 +478,6 @@ class Matchmaker():
                 f"Understood. The post made on your behalf in {self.channel.jump_url} has been deleted."
             )
             self.pending_user_mention = None
-            self.pending_user_id = None
             return True
         return False
 
@@ -628,12 +531,9 @@ class PoolBot(discord.Client):
         self.second_pool_tracker: Optional[PoolTracker] = PoolTracker(self.sheet, self.pool_channel, self.second_packs_channel, self.config.second_spreadsheet_id, self.pools_tab_id) if self.config.second_spreadsheet_id else None
 
         self.matchmaker = Matchmaker(
-            self.sheet,
             "!lfm",
             "a match",
             self.lfm_channel,
-            self.spreadsheet_id,
-            self.config.player_database_tab_id,
         )
         self.matchmakers = [self.matchmaker]
         for user in self.users:
