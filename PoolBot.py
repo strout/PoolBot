@@ -252,6 +252,94 @@ async def get_spreadsheet_values(sheet: Any, spreadsheet_id: str, range: str, va
             await sleep(retries)
     return []
 
+async def get_sheet_title_by_id(spreadsheet: Any, spreadsheet_id: str, tab_id: str) -> str:
+    """Resolve a numeric sheet tab ID to its title for A1 range notation."""
+    tab_id_int = int(tab_id)
+    try:
+        result = spreadsheet.get(
+            spreadsheetId=spreadsheet_id,
+            fields='sheets(properties(sheetId,title))',
+        ).execute()
+    except HttpError as err:
+        raise SpreadsheetError(f"Failed to fetch spreadsheet metadata: {err}")
+    for sheet in result.get('sheets', []):
+        props = sheet.get('properties', {})
+        if props.get('sheetId') == tab_id_int:
+            return props['title']
+    raise SpreadsheetError(f"Sheet tab id {tab_id} not found in spreadsheet")
+
+
+def sheet_a1_range(tab_name: str, a1: str) -> str:
+    escaped = tab_name.replace("'", "''")
+    return f"'{escaped}'!{a1}"
+
+
+def format_pool_link(value: str) -> str:
+    stripped = value.strip()
+    if not stripped:
+        return ""
+    if stripped.startswith("http://") or stripped.startswith("https://"):
+        return stripped
+    return f"https://sealeddeck.tech/{stripped}"
+
+
+class CurrentPoolLookup:
+    """Look up a player's Current Pool (Pools column G) from their Discord ID."""
+
+    def __init__(
+        self,
+        sheet: Any,
+        spreadsheet_id: str,
+        player_database_tab_id: str,
+        pools_tab_id: str,
+    ):
+        self.sheet = sheet
+        self.spreadsheet_id = spreadsheet_id
+        self.player_database_tab_id = player_database_tab_id
+        self.pools_tab_id = pools_tab_id
+        self._player_tab_name: Optional[str] = None
+        self._pools_tab_name: Optional[str] = None
+
+    async def _player_tab(self) -> str:
+        if self._player_tab_name is None:
+            self._player_tab_name = await get_sheet_title_by_id(
+                self.sheet, self.spreadsheet_id, self.player_database_tab_id
+            )
+        return self._player_tab_name
+
+    async def _pools_tab(self) -> str:
+        if self._pools_tab_name is None:
+            self._pools_tab_name = await get_sheet_title_by_id(
+                self.sheet, self.spreadsheet_id, self.pools_tab_id
+            )
+        return self._pools_tab_name
+
+    async def pool_link_for_discord_id(self, discord_id: int) -> Optional[str]:
+        player_rows = await get_spreadsheet_values(
+            self.sheet, self.spreadsheet_id, sheet_a1_range(await self._player_tab(), "D2:E")
+        )
+        arena_id = None
+        discord_id_str = str(discord_id)
+        for row in player_rows:
+            if len(row) < 2:
+                continue
+            discord_cell = "".join(c for c in row[0] if c.isdigit())
+            if discord_cell == discord_id_str:
+                arena_id = row[1].strip()
+                break
+        if not arena_id:
+            return None
+
+        pool_rows = await get_spreadsheet_values(
+            self.sheet, self.spreadsheet_id, sheet_a1_range(await self._pools_tab(), "A:Z")
+        )
+        for row in pool_rows:
+            if any(cell.strip() == arena_id for cell in row):
+                if len(row) > 6 and row[6].strip():
+                    return format_pool_link(row[6])
+                return None
+        return None
+
 async def set_cell_to_red(sheet, spreadsheet_id: str, tab_id: str, row: int, col: str):
     # Note that this request (annoyingly) uses indices instead of the regular cell format.
     color_body = {
@@ -404,13 +492,29 @@ class Matchmaker():
         what_it_is: str,
         channel: discord.TextChannel,
         extra=None,
+        challenge_command: str = "!challenge",
+        anonymous_noun: str = "player",
+        initiate_text: Optional[str] = None,
+        pool_lookup: Optional[CurrentPoolLookup] = None,
     ):
         self.command = command
         self.what_it_is = what_it_is
         self.channel = channel
         self.extra = extra
+        self.challenge_command = challenge_command
+        self.anonymous_noun = anonymous_noun
+        self.initiate_text = initiate_text if initiate_text is not None else what_it_is
+        self.pool_lookup = pool_lookup
         self.pending_user_mention: Optional[str] = None
+        self.pending_user_id: Optional[int] = None
         self.active_message: Optional[discord.Message] = None
+
+    def looking_message(self) -> str:
+        return (
+            f"An anonymous {self.anonymous_noun} is looking for {self.what_it_is}. "
+            f"Post `{self.challenge_command}` to reveal their identity and "
+            f"initiate {self.initiate_text}."
+        )
 
     async def issue_challenge(self, message: discord.Message):
         """Handle challenge command. Early returns if no pending user or active message."""
@@ -424,10 +528,29 @@ class Matchmaker():
             return  # Shouldn't happen if pending_user_mention is set, but guard anyway
 
         overall_extra = self.extra() if self.extra else ""
+        announcement = (
+            f"{self.pending_user_mention}, your anonymous LFM has been accepted by {message.author.mention}."
+        )
+        if self.pool_lookup is not None:
+            pool_link = None
+            if self.pending_user_id is not None:
+                try:
+                    async with self.channel.typing():
+                        pool_link = await self.pool_lookup.pool_link_for_discord_id(self.pending_user_id)
+                except SpreadsheetError as e:
+                    print(f"spreadsheet error — looking up knight pool: {e}")
+            if pool_link:
+                announcement = (
+                    f"{self.pending_user_mention}, your challenge has been accepted by {message.author.mention}. "
+                    f"Here is the Knight's pool: {pool_link}"
+                )
+            else:
+                announcement = (
+                    f"{self.pending_user_mention}, your challenge has been accepted by {message.author.mention}. "
+                    f"I couldn't find the Knight's pool in the spreadsheet."
+                )
         try:
-            await self.channel.send(
-                f"{self.pending_user_mention}, your anonymous LFM has been accepted by {message.author.mention}.{overall_extra}"
-            )
+            await self.channel.send(f"{announcement}{overall_extra}")
         except Exception as e:
             print(f"Failed to send match announcement: {e}, keeping player pending")
             # State remains intact, player stays pending
@@ -442,23 +565,21 @@ class Matchmaker():
 
         # Clear state - match is done regardless of whether update_message succeeded
         self.pending_user_mention = None
+        self.pending_user_id = None
         self.active_message = None
 
     async def handle_command(self, message: discord.Message, argument: str):
         if self.pending_user_mention:
             await message.author.send(
-                f"Someone is already looking for {self.what_it_is}. You can play them by posting `!challenge` in {self.channel.jump_url}"
+                f"Someone is already looking for {self.what_it_is}. You can play them by posting `{self.challenge_command}` in {self.channel.jump_url}"
             )
             return
+        looking = self.looking_message()
         if not argument:
-            self.active_message = await self.channel.send(
-                f"An anonymous player is looking for {self.what_it_is}. Post `!challenge` to reveal their identity and "
-                f"initiate {self.what_it_is}. "
-            )
+            self.active_message = await self.channel.send(f"{looking} ")
         else:
             self.active_message = await self.channel.send(
-                f"An anonymous player is looking for {self.what_it_is}. Post `!challenge` to reveal their identity and "
-                f"initiate {self.what_it_is}.\n "
+                f"{looking}\n "
                 f"Message from the player:\n"
                 f"> {argument}"
             )
@@ -469,6 +590,7 @@ class Matchmaker():
             f"If you want to cancel this, send me a message with the text `!nvm`."
         )
         self.pending_user_mention = message.author.mention
+        self.pending_user_id = int(message.author.id)
 
     async def handle_retract(self, message: discord.Message) -> bool:
         if message.author.mention == self.pending_user_mention and self.active_message is not None:
@@ -478,6 +600,7 @@ class Matchmaker():
                 f"Understood. The post made on your behalf in {self.channel.jump_url} has been deleted."
             )
             self.pending_user_mention = None
+            self.pending_user_id = None
             return True
         return False
 
@@ -536,6 +659,23 @@ class PoolBot(discord.Client):
             self.lfm_channel,
         )
         self.matchmakers = [self.matchmaker]
+        if self.config.knight_channel_id:
+            self.matchmakers.append(
+                Matchmaker(
+                    "!knight",
+                    "a Dragon",
+                    self._get_channel(self.config.knight_channel_id),
+                    challenge_command="!dragon",
+                    anonymous_noun="knight",
+                    initiate_text="a Dragon match",
+                    pool_lookup=CurrentPoolLookup(
+                        self.sheet,
+                        self.spreadsheet_id,
+                        self.config.player_database_tab_id,
+                        self.config.pools_tab_id,
+                    ),
+                )
+            )
         for user in self.users:
             if user.name == 'Booster Tutor':
                 self.booster_tutor = user
@@ -636,13 +776,20 @@ class PoolBot(discord.Client):
                 )
             return
 
-        matchmaker = next((mm for mm in self.matchmakers if message.channel == mm.channel and command == "!challenge"), None)
+        matchmaker = next(
+            (mm for mm in self.matchmakers if message.channel == mm.channel and command == mm.challenge_command),
+            None,
+        )
         if matchmaker:
             await matchmaker.issue_challenge(message)
         elif command == '!help':
+            challenge_help = "\n".join(
+                f"> `{mm.challenge_command}`: Challenges the current player looking for {mm.what_it_is}"
+                for mm in self.matchmakers
+            )
             await message.channel.send(
                 f"You can give me one of the following commands:\n"
-                f"> `!challenge`: Challenges the current player in the LFM (or duel) queue\n"
+                f"{challenge_help}\n"
                 f"> `!randint A B`: Generates a random integer n, where A <= n <= B. If only one input is given, "
                 f"uses that value as B and defaults A to 1. \n "
                 f"> `!help`: shows this message\n"

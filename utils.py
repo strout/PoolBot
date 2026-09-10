@@ -26,6 +26,7 @@ class Config:
 
 	second_spreadsheet_id: Optional[str] = None
 	skip_username: Optional[bool] = None
+	knight_channel_id: Optional[int] = None
 
 
 def get_config(path: Path = Path("config.yaml")) -> Config:
