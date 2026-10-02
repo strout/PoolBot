@@ -26,12 +26,12 @@ class Config:
 
 	second_spreadsheet_id: Optional[str] = None
 	skip_username: Optional[bool] = None
-	knight_channel_id: Optional[int] = None
 
 
 def get_config(path: Path = Path("config.yaml")) -> Config:
 	with open(path) as file:
 		config_dict = yaml.load(file, Loader=yaml.FullLoader)
-	config = Config(**config_dict)
+	known = {field.name for field in Config.__dataclass_fields__.values()}
+	config = Config(**{key: value for key, value in config_dict.items() if key in known})
 	return config
 
